@@ -27,7 +27,7 @@ You can download the raw 100style dataset and then use our script ([ARP-Batch-Re
 ```shell
 mv 100STYLE_mixamo.zip ./data
 mkdir -p data/pkls
-unzip data/100STYLE_mixamo.zip -d ./data/100STYLE_mixamo
+unzip data/100STYLE_to_mixamo.zip -d ./data/100STYLE_mixamo
 ```
 
 To expedite training, we have omitted certain joints from the original Mixamo skeleton, such as those of the fingers, which are also not present in the original 100style dataset. Subsequently, we package the data into a `.pkl` file:
@@ -56,6 +56,7 @@ To train the network with the default settings, use the following command:
 
 ```shell
 python train.py -n camdm --epoch 100 --batch_size 512 --diffusion_steps 4 
+python train.py -n camdm --epoch 100 --batch_size 512 --diffusion_steps 4  --distributed --world_size 8 
 ```
 
 We offer various options for network training. For a detailed explanation, please refer to our [option.py](config/option.py) and [default.json](config/default.json) files. For instance, the `--cluster` option facilitates training in a cluster environment by allowing the training to resume automatically if it is interrupted.

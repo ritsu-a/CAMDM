@@ -1,0 +1,1 @@
+07 Jan 2026 16:14:02 Warning: T_pose has no offsets/parents, disabling use_loss_3d and use_loss_contact

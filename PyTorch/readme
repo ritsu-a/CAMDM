@@ -1,0 +1,18 @@
+parsing joint_vec into pkl for diffusion training:
+    python data/make_npy_pkl.py --input_dir data_disk0/synthetic_data/SG_2_or_3_long_sentence_1030_en_joint_vecs/npy \
+    --output_path data/pkls/synthetic_en.pkl
+
+
+  python train.py -n camdm --epoch 100 --batch_size 512 --diffusion_steps 4 -i data/pkls/100style_g1.pkl 
+
+trainin 
+    python train.py -n camdm --epoch 100 --batch_size 512 --diffusion_steps 4  --distributed --world_size 8 -c ./config/baseline_g1.json -i data/pkls/synthetic_en.pkl
+
+
+python data/process_bvh.py
+python data/make_pose_data.py
+
+
+evaluatation:
+ python test_model.py --checkpoint ./save/camdm_100style_g1/best.pt --data data/pkls/100style_g1.pkl --output ./test_output --num_samples 10
+

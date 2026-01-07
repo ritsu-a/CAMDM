@@ -77,3 +77,13 @@ venv.bak/
 *.log
 *.bak
 *.swp
+
+./data
+
+
+PyTorch/data/100STYLE_mixamo/
+PyTorch/data/100STYLE_g1/
+PyTorch/save/
+PyTorch/data/pkls/
+PyTorch/data_disk0
+100STYLE_to_mixamo.zip

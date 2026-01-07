@@ -13,6 +13,21 @@ from scipy.spatial.transform import Rotation as R
 from tqdm import tqdm
 from torch.utils.data import Dataset
 
+# 导入NPZMotion类以支持pickle加载
+try:
+    from data.make_pose_data import NPZMotion
+    # 将NPZMotion注册到__main__模块，以便pickle能够找到它
+    import __main__
+    if not hasattr(__main__, 'NPZMotion'):
+        __main__.NPZMotion = NPZMotion
+except ImportError:
+    # 如果导入失败，定义占位类
+    class NPZMotion:
+        pass
+    import __main__
+    if not hasattr(__main__, 'NPZMotion'):
+        __main__.NPZMotion = NPZMotion
+
 
 class MotionDataset(Dataset):
     '''
@@ -27,7 +42,7 @@ class MotionDataset(Dataset):
         self.local_conds = {'traj_pose': [], 'traj_trans': []}
         self.global_conds = {'style': []}
         
-        self.rot_feat_dim = {'q': 4, '6d': 6, 'euler': 3}
+        self.rot_feat_dim = {'q': 4, '6d': 6, 'euler': 3, 'qpos': 1}
         self.reference_frame_idx = past_frame
         
         data_source = pickle.load(open(pkl_path, 'rb'))
@@ -41,7 +56,24 @@ class MotionDataset(Dataset):
             if frame_num < window_size:
                 continue
             frame_nums.append([motion_item['style'], frame_num])
-            self.rotations_list.append(motion_item['local_joint_rotations'].astype(dtype))
+            
+            # 直接保存qpos，不转换为旋转
+            # local_joint_rotations 是 qpos (frames, 29) - 29个关节的角度
+            local_joint_rotations = motion_item['local_joint_rotations'].astype(dtype)
+            
+            # 保存qpos和root_quat的原始格式
+            qpos_data = {
+                'qpos': local_joint_rotations,  # (frames, 29) - 29个关节的角度
+                'root_quat': motion_item.get('root_quat', None)  # (frames, 4) - 根关节四元数，可选
+            }
+            
+            # 如果数据是2D，说明是qpos格式，直接保存
+            if len(local_joint_rotations.shape) == 2:
+                self.rotations_list.append(qpos_data)
+            else:
+                # 如果已经是其他格式（向后兼容），直接保存
+                self.rotations_list.append(local_joint_rotations)
+            
             self.root_pos_list.append(motion_item['global_root_positions'].astype(dtype))
             
             self.local_conds['traj_pose'].append(np.array([item for item in motion_item['traj_pose']], dtype=dtype))
@@ -56,7 +88,14 @@ class MotionDataset(Dataset):
             
         self.item_frame_indices = np.concatenate(item_frame_indices_list, axis=0)
     
-        self.joint_num, self.per_rot_feat = self.rotations_list[0].shape[-2], self.rot_feat_dim[rot_req]
+        # 确定关节数量和特征维度
+        first_rot_data = self.rotations_list[0]
+        if isinstance(first_rot_data, dict):
+            # qpos格式：29个关节 + 1个根关节 = 30
+            self.joint_num = 30
+        else:
+            self.joint_num = first_rot_data.shape[-2]
+        self.per_rot_feat = self.rot_feat_dim[rot_req]
         self.traj_aug_indexs1 = list(range(self.local_conds['traj_pose'][0].shape[0]))
         self.traj_aug_indexs2 = list(range(self.local_conds['traj_trans'][0].shape[0]))
         self.mask = np.ones(window_size - self.reference_frame_idx, dtype=bool)
@@ -71,59 +110,142 @@ class MotionDataset(Dataset):
         item_frame_indice = self.item_frame_indices[idx]
         motion_idx, frame_indices = item_frame_indice[0], item_frame_indice[1:]
         
-        rotations = self.rotations_list[motion_idx][frame_indices].copy()
+        # 获取旋转数据，可能是qpos格式或四元数格式
+        rotations_data = self.rotations_list[motion_idx]
+        if isinstance(rotations_data, dict):
+            # qpos格式：直接使用qpos，不转换为旋转
+            qpos = rotations_data['qpos'][frame_indices].copy().astype(self.dtype)  # (frames, 29)
+            
+            rotations = qpos[..., None]  # (frames, 29， 1)
+        else:
+            # 四元数格式（向后兼容）- 保持原有处理逻辑
+            rotations = rotations_data[frame_indices].copy()
+            # 转换为所需格式
+            traj_rotation = self.local_conds['traj_pose'][motion_idx][random.choice(self.traj_aug_indexs1), frame_indices].copy()
+            
+            root_pos = self.root_pos_list[motion_idx][frame_indices].copy()
+            root_pos[:, [0, 2]] -= root_pos[self.reference_frame_idx-1:self.reference_frame_idx, [0, 2]]
+            
+            traj_pos = root_pos[:, [0, 2]].copy()
+            random_option = np.random.random()
+            if random_option <0.5:
+                pass
+            elif random_option < 0.75:
+                traj_pos = gaussian_filter1d(traj_pos, 5, axis=0)
+            else:
+                traj_pos = gaussian_filter1d(traj_pos, 10, axis=0)
+            traj_pos -= traj_pos[self.reference_frame_idx-1:self.reference_frame_idx]
+            
+            traj_rotation = traj_rotation[self.reference_frame_idx:]
+            traj_pos = traj_pos[self.reference_frame_idx:]
+            
+            rotation_xyzw, traj_rotation_xyzw = rotations[..., [1, 2, 3, 0]], traj_rotation[..., [1, 2, 3, 0]]
+            theta = np.repeat(np.random.uniform(0, 2*np.pi), rotations.shape[0]).astype(self.dtype)
+            rot_vec = R.from_rotvec(np.pad(theta[..., np.newaxis], ((0, 0), (1, 1)), 'constant', constant_values=0))
+            rotations[:, 0] = (rot_vec*R.from_quat(rotation_xyzw[:, 0])).as_quat()[..., [3, 0, 1, 2]]
+            traj_rotation = (rot_vec[self.reference_frame_idx:]*R.from_quat(traj_rotation_xyzw)).as_quat()[..., [3, 0, 1, 2]]
+            root_pos = rot_vec.apply(root_pos).astype(self.dtype)
+            traj_pos_3d = np.zeros((traj_pos.shape[0], 3), dtype=self.dtype)
+            traj_pos_3d[:, [0, 2]] = traj_pos
+            traj_pos = rot_vec[self.reference_frame_idx:].apply(traj_pos_3d)[:, [0, 2]].astype(self.dtype)
+            
+            rotations = nn_transforms.get_rotation(rotations.astype(self.dtype), self.rot_req)
+            traj_rotation = nn_transforms.get_rotation(traj_rotation.astype(self.dtype), self.rot_req)
+            
+            root_pos_extra_dim = np.zeros((root_pos.shape[0], 1, self.per_rot_feat - 3), dtype=self.dtype)
+            root_pos_extra_dim = torch.from_numpy(np.concatenate((root_pos[:, np.newaxis], root_pos_extra_dim), axis=2, dtype=self.dtype))
+            rotations_with_root = torch.cat((rotations, root_pos_extra_dim), axis=1)
+            
+            future_motion = rotations_with_root[self.reference_frame_idx:]
+            past_motion = rotations_with_root[:self.reference_frame_idx]
+            
+            style_idx = float(self.style_set.index(self.global_conds['style'][motion_idx]))
+            
+            # 确保traj_rotation是numpy array
+            if isinstance(traj_rotation, torch.Tensor):
+                traj_rotation_np = traj_rotation.cpu().numpy()
+            else:
+                traj_rotation_np = traj_rotation
+            
+            return {
+                'data': future_motion,
+                'conditions': {
+                    'past_motion': past_motion,
+                    'style_idx': torch.tensor(style_idx, dtype=torch.long),
+                    'traj_pose': torch.from_numpy(traj_rotation_np),
+                    'traj_trans': torch.from_numpy(traj_pos),
+                    'mask': torch.ones(future_motion.shape[0], dtype=torch.bool)
+                }
+            }
+        
+        # qpos格式的处理
+        traj_rotation = self.local_conds['traj_pose'][motion_idx][random.choice(self.traj_aug_indexs1), frame_indices].copy()
+        
         root_pos = self.root_pos_list[motion_idx][frame_indices].copy()
         root_pos[:, [0, 2]] -= root_pos[self.reference_frame_idx-1:self.reference_frame_idx, [0, 2]]
-        traj_rotation = self.local_conds['traj_pose'][motion_idx][random.choice(self.traj_aug_indexs1), frame_indices].copy()
-
+        
         traj_pos = root_pos[:, [0, 2]].copy()
         random_option = np.random.random()
-        # Random filtering trajectory. Relieve the out-of-distribution(OOD) problem during runtime
         if random_option <0.5:
             pass
         elif random_option < 0.75:
             traj_pos = gaussian_filter1d(traj_pos, 5, axis=0)
         else:
             traj_pos = gaussian_filter1d(traj_pos, 10, axis=0)
-            
         traj_pos -= traj_pos[self.reference_frame_idx-1:self.reference_frame_idx]
 
+        # Random rotation augmentation (仿照四元数格式的处理)
+        # 需要在切片之前进行旋转增强，使用完整长度的数据
+        full_length = len(root_pos)
+        traj_rotation_xyzw = traj_rotation[..., [1, 2, 3, 0]]  # wxyz -> xyzw
+        theta = np.repeat(np.random.uniform(0, 2*np.pi), full_length).astype(self.dtype)
+        rot_vec = R.from_rotvec(np.pad(theta[..., np.newaxis], ((0, 0), (1, 1)), 'constant', constant_values=0))
+        traj_rotation = (rot_vec*R.from_quat(traj_rotation_xyzw)).as_quat()[..., [3, 0, 1, 2]]  # xyzw -> wxyz
+        root_pos = rot_vec.apply(root_pos).astype(self.dtype)
+        traj_pos_3d = np.zeros((full_length, 3), dtype=self.dtype)
+        traj_pos_3d[:, [0, 2]] = traj_pos
+        traj_pos = rot_vec.apply(traj_pos_3d)[:, [0, 2]].astype(self.dtype)
+        
+        # 切片：只取reference_frame_idx之后的数据
         traj_rotation = traj_rotation[self.reference_frame_idx:]
         traj_pos = traj_pos[self.reference_frame_idx:]
         
-        # Random rotation augmentation 
-        rotation_xyzw, traj_rotation_xyzw = rotations[..., [1, 2, 3, 0]], traj_rotation[..., [1, 2, 3, 0]]
-        
-        theta = np.repeat(np.random.uniform(0, 2*np.pi), rotations.shape[0]).astype(self.dtype)
-        rot_vec = R.from_rotvec(np.pad(theta[..., np.newaxis], ((0, 0), (1, 1)), 'constant', constant_values=0))
-        rotations[:, 0] = (rot_vec*R.from_quat(rotation_xyzw[:, 0])).as_quat()[..., [3, 0, 1, 2]]
-        traj_rotation = (rot_vec[self.reference_frame_idx:]*R.from_quat(traj_rotation_xyzw)).as_quat()[..., [3, 0, 1, 2]]
-        root_pos = rot_vec.apply(root_pos).astype(self.dtype)
-        traj_pos_3d = np.zeros((traj_pos.shape[0], 3), dtype=self.dtype)
-        traj_pos_3d[:, [0, 2]] = traj_pos
-        traj_pos = rot_vec[self.reference_frame_idx:].apply(traj_pos_3d)[:, [0, 2]].astype(self.dtype)
-
-        rotations = nn_transforms.get_rotation(rotations.astype(self.dtype), self.rot_req)
+        # 将traj_rotation转换为训练所需的格式（6d格式）
         traj_rotation = nn_transforms.get_rotation(traj_rotation.astype(self.dtype), self.rot_req)
         
-        root_pos_extra_dim = np.zeros((root_pos.shape[0], 1, self.per_rot_feat - 3), dtype=self.dtype)
-        root_pos_extra_dim = torch.from_numpy(np.concatenate((root_pos[:, np.newaxis], root_pos_extra_dim), axis=2, dtype=self.dtype))
-        rotations_with_root = torch.cat((rotations, root_pos_extra_dim), axis=1)
+        # qpos格式：直接使用，转换为tensor
+        # rotations是(frames, 29, 1)
+        # 添加root_pos (frames, 3, 1)
+        rotations_tensor = torch.from_numpy(rotations.astype(self.dtype))  # (frames, 29, 1)
+        root_pos_tensor = torch.from_numpy(root_pos.astype(self.dtype))  # (frames, 3)
+        
+        # 合并：qpos + root_pos = (frames, features, 1)
+        # rotations是(frames, 29, 1)，root_pos reshape为(frames, 3, 1)
+        root_pos_reshaped = root_pos_tensor[..., np.newaxis]  # (frames, 3, 1)
+        all_features = torch.cat([rotations_tensor, root_pos_reshaped], dim=1)  # (frames, 32, 1)
+        
+        # all_features现在是(frames, 32, 1)，其中29个是qpos，3个是root_pos
+        rotations_with_root = all_features  # (frames, 32, 1)
         
         future_motion = rotations_with_root[self.reference_frame_idx:]
         past_motion = rotations_with_root[:self.reference_frame_idx]
     
         style_idx = float(self.style_set.index(self.global_conds['style'][motion_idx]))
         
+        # 确保traj_rotation是numpy array
+        if isinstance(traj_rotation, torch.Tensor):
+            traj_rotation_np = traj_rotation.cpu().numpy()
+        else:
+            traj_rotation_np = traj_rotation
+        
         return {
             'data': future_motion,
             'conditions': {
                 'past_motion': past_motion,
-                'traj_pose': traj_rotation,
-                'traj_trans': traj_pos,
-                'style': self.global_conds['style'][motion_idx],
-                'style_idx': style_idx,
-                'mask': self.mask
+                'traj_pose': torch.from_numpy(traj_rotation_np),
+                'traj_trans': torch.from_numpy(traj_pos),
+                'style_idx': torch.tensor(style_idx, dtype=torch.long),
+                'mask': torch.ones(future_motion.shape[0], dtype=torch.bool)
             }
         }     
 

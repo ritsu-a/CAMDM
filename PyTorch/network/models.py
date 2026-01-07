@@ -189,7 +189,11 @@ class OutputProcess(nn.Module):
     def forward(self, output):
         nframes, bs, d = output.shape
         output = self.poseFinal(output)  
-        output = output.reshape(nframes, bs, self.njoints, self.nfeats)
+        # 使用 input_feats 来确定实际的关节数和特征数
+        # 对于 qpos 格式：input_feats=32，应该 reshape 为 (nframes, bs, 32, 1)
+        # 对于传统格式：input_feats = njoints * nfeats
+        actual_joints = self.input_feats // self.nfeats if self.nfeats > 0 else self.njoints
+        output = output.reshape(nframes, bs, actual_joints, self.nfeats)
         output = output.permute(1, 2, 3, 0)  
         return output
     

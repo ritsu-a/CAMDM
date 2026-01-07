@@ -9,6 +9,10 @@ right_shoulder_name = 'mixamorig:RightShoulder'
 left_hip_name = 'mixamorig:LeftUpLeg'
 right_hip_name = 'mixamorig:RightUpLeg'
 
+# G1 model joint names
+g1_left_hip_name = 'left_hip_pitch_joint'
+g1_right_hip_name = 'right_hip_pitch_joint'
+
 
 def get_info(root_folder_path, meta_file='Dataset_List.csv', framecuts_file='Frame_Cuts.csv'):
     

@@ -31,10 +31,26 @@ def train(config, resume, logger, tb_writer):
     
     diffusion = create_gaussian_diffusion(config)
     
-    input_feats = (train_data.joint_num+1) * train_data.per_rot_feat   # use the root translation as an extra joint
+    # 检查是否是qpos格式
+    first_rot_data = train_data.rotations_list[0]
+    is_qpos_format = isinstance(first_rot_data, dict)
+    
+    if is_qpos_format:
+        # qpos格式：32个关节（29个qpos + 3个root_pos），每个1维
+        # input_feats = 32 * 1 = 32
+        input_feats = 32
+        # 实际关节数：29个qpos关节，加上root_pos算1个关节，总共30个
+        # 但特征维度是32，因为root_pos有3个维度
+        actual_joint_num = 30
+        actual_per_rot_feat = 1
+    else:
+        # 传统格式
+        input_feats = (train_data.joint_num+1) * train_data.per_rot_feat   # use the root translation as an extra joint
+        actual_joint_num = train_data.joint_num
+        actual_per_rot_feat = train_data.per_rot_feat
 
     model = MotionDiffusion(input_feats, len(train_data.style_set),
-                train_data.joint_num+1, train_data.per_rot_feat, 
+                actual_joint_num+1, actual_per_rot_feat, 
                 config.arch.rot_req, config.arch.clip_len,
                 config.arch.latent_dim, config.arch.ff_size, 
                 config.arch.num_layers, config.arch.num_heads, 
