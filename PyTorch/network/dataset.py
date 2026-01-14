@@ -75,8 +75,19 @@ class MotionDataset(Dataset):
             
             self.root_pos_list.append(motion_item['global_root_positions'].astype(dtype))
             
-            self.local_conds['traj_pose'].append(np.array([item for item in motion_item['traj_pose']], dtype=dtype))
-            self.local_conds['traj_trans'].append(np.array([item for item in motion_item['traj']], dtype=dtype))
+            # 处理traj数据（可能为空列表）
+            traj_pose_data = motion_item.get('traj_pose', [])
+            traj_data = motion_item.get('traj', [])
+            
+            if len(traj_pose_data) > 0:
+                self.local_conds['traj_pose'].append(np.array([item for item in traj_pose_data], dtype=dtype))
+            else:
+                self.local_conds['traj_pose'].append(np.array([], dtype=dtype))  # 空数组
+            
+            if len(traj_data) > 0:
+                self.local_conds['traj_trans'].append(np.array([item for item in traj_data], dtype=dtype))
+            else:
+                self.local_conds['traj_trans'].append(np.array([], dtype=dtype))  # 空数组
             
             self.global_conds['style'].append(motion_item['style'])
             # 保存文本信息，如果不存在则使用style作为文本
@@ -111,8 +122,18 @@ class MotionDataset(Dataset):
         else:
             self.joint_num = first_rot_data.shape[-2]
         self.per_rot_feat = self.rot_feat_dim[rot_req]
-        self.traj_aug_indexs1 = list(range(self.local_conds['traj_pose'][0].shape[0]))
-        self.traj_aug_indexs2 = list(range(self.local_conds['traj_trans'][0].shape[0]))
+        
+        # 检查traj数据是否为空
+        self.has_traj = len(self.local_conds['traj_pose']) > 0 and len(self.local_conds['traj_pose'][0]) > 0
+        
+        if self.has_traj:
+            self.traj_aug_indexs1 = list(range(self.local_conds['traj_pose'][0].shape[0]))
+            self.traj_aug_indexs2 = list(range(self.local_conds['traj_trans'][0].shape[0]))
+        else:
+            self.traj_aug_indexs1 = []
+            self.traj_aug_indexs2 = []
+            print('Warning: traj数据为空，将使用零张量作为traj条件')
+        
         self.mask = np.ones(window_size - self.reference_frame_idx, dtype=bool)
         self.style_set = sorted(list(set(self.global_conds['style'])))
         print('Dataset loaded, trained with %d clips, %d frames, %d mins in total' % (len(frame_nums), sum([item[1] for item in frame_nums]), sum([item[1] for item in frame_nums])/30/60))
@@ -147,37 +168,64 @@ class MotionDataset(Dataset):
         else:
             # 四元数格式（向后兼容）- 保持原有处理逻辑
             rotations = rotations_data[frame_indices].copy()
-            # 转换为所需格式
-            traj_rotation = self.local_conds['traj_pose'][motion_idx][random.choice(self.traj_aug_indexs1), frame_indices].copy()
             
             root_pos = self.root_pos_list[motion_idx][frame_indices].copy()
-            root_pos[:, [0, 2]] -= root_pos[self.reference_frame_idx-1:self.reference_frame_idx, [0, 2]]
+            # 当past_frame=0时，使用第0帧作为参考；否则使用reference_frame_idx-1帧
+            ref_idx = max(0, self.reference_frame_idx - 1) if self.reference_frame_idx > 0 else 0
+            root_pos[:, [0, 2]] -= root_pos[ref_idx:ref_idx+1, [0, 2]]
             
-            traj_pos = root_pos[:, [0, 2]].copy()
-            random_option = np.random.random()
-            if random_option <0.5:
-                pass
-            elif random_option < 0.75:
-                traj_pos = gaussian_filter1d(traj_pos, 5, axis=0)
+            # 处理traj数据（如果为空则创建零张量）
+            if self.has_traj:
+                # 转换为所需格式
+                traj_rotation = self.local_conds['traj_pose'][motion_idx][random.choice(self.traj_aug_indexs1), frame_indices].copy()
+                
+                traj_pos = root_pos[:, [0, 2]].copy()
+                random_option = np.random.random()
+                if random_option <0.5:
+                    pass
+                elif random_option < 0.75:
+                    traj_pos = gaussian_filter1d(traj_pos, 5, axis=0)
+                else:
+                    traj_pos = gaussian_filter1d(traj_pos, 10, axis=0)
+                traj_pos -= traj_pos[ref_idx:ref_idx+1]
+                
+                traj_rotation = traj_rotation[self.reference_frame_idx:]
+                traj_pos = traj_pos[self.reference_frame_idx:]
+                
+                rotation_xyzw, traj_rotation_xyzw = rotations[..., [1, 2, 3, 0]], traj_rotation[..., [1, 2, 3, 0]]
+                theta = np.repeat(np.random.uniform(0, 2*np.pi), rotations.shape[0]).astype(self.dtype)
+                rot_vec = R.from_rotvec(np.pad(theta[..., np.newaxis], ((0, 0), (1, 1)), 'constant', constant_values=0))
+                rotations[:, 0] = (rot_vec*R.from_quat(rotation_xyzw[:, 0])).as_quat()[..., [3, 0, 1, 2]]
+                traj_rotation = (rot_vec[self.reference_frame_idx:]*R.from_quat(traj_rotation_xyzw)).as_quat()[..., [3, 0, 1, 2]]
+                root_pos = rot_vec.apply(root_pos).astype(self.dtype)
+                traj_pos_3d = np.zeros((traj_pos.shape[0], 3), dtype=self.dtype)
+                traj_pos_3d[:, [0, 2]] = traj_pos
+                traj_pos = rot_vec[self.reference_frame_idx:].apply(traj_pos_3d)[:, [0, 2]].astype(self.dtype)
+                
+                rotations = nn_transforms.get_rotation(rotations.astype(self.dtype), self.rot_req)
+                traj_rotation = nn_transforms.get_rotation(traj_rotation.astype(self.dtype), self.rot_req)
+                
+                # 确保traj_rotation是numpy array
+                if isinstance(traj_rotation, torch.Tensor):
+                    traj_rotation_np = traj_rotation.cpu().numpy()
+                else:
+                    traj_rotation_np = traj_rotation
+                traj_pose_tensor = torch.from_numpy(traj_rotation_np)
+                traj_trans_tensor = torch.from_numpy(traj_pos)
             else:
-                traj_pos = gaussian_filter1d(traj_pos, 10, axis=0)
-            traj_pos -= traj_pos[self.reference_frame_idx-1:self.reference_frame_idx]
-            
-            traj_rotation = traj_rotation[self.reference_frame_idx:]
-            traj_pos = traj_pos[self.reference_frame_idx:]
-            
-            rotation_xyzw, traj_rotation_xyzw = rotations[..., [1, 2, 3, 0]], traj_rotation[..., [1, 2, 3, 0]]
-            theta = np.repeat(np.random.uniform(0, 2*np.pi), rotations.shape[0]).astype(self.dtype)
-            rot_vec = R.from_rotvec(np.pad(theta[..., np.newaxis], ((0, 0), (1, 1)), 'constant', constant_values=0))
-            rotations[:, 0] = (rot_vec*R.from_quat(rotation_xyzw[:, 0])).as_quat()[..., [3, 0, 1, 2]]
-            traj_rotation = (rot_vec[self.reference_frame_idx:]*R.from_quat(traj_rotation_xyzw)).as_quat()[..., [3, 0, 1, 2]]
-            root_pos = rot_vec.apply(root_pos).astype(self.dtype)
-            traj_pos_3d = np.zeros((traj_pos.shape[0], 3), dtype=self.dtype)
-            traj_pos_3d[:, [0, 2]] = traj_pos
-            traj_pos = rot_vec[self.reference_frame_idx:].apply(traj_pos_3d)[:, [0, 2]].astype(self.dtype)
-            
-            rotations = nn_transforms.get_rotation(rotations.astype(self.dtype), self.rot_req)
-            traj_rotation = nn_transforms.get_rotation(traj_rotation.astype(self.dtype), self.rot_req)
+                # traj为空，创建零张量
+                # 注意：traj的帧数应该等于future_frames（不是future_frames//2）
+                future_frames = len(frame_indices) - self.reference_frame_idx
+                traj_pose_tensor = torch.zeros((future_frames, 6), dtype=torch.float32)  # 6D旋转格式
+                traj_trans_tensor = torch.zeros((future_frames, 2), dtype=torch.float32)  # XZ平面位置
+                
+                # 仍然需要处理旋转增强
+                rotation_xyzw = rotations[..., [1, 2, 3, 0]]
+                theta = np.repeat(np.random.uniform(0, 2*np.pi), rotations.shape[0]).astype(self.dtype)
+                rot_vec = R.from_rotvec(np.pad(theta[..., np.newaxis], ((0, 0), (1, 1)), 'constant', constant_values=0))
+                rotations[:, 0] = (rot_vec*R.from_quat(rotation_xyzw[:, 0])).as_quat()[..., [3, 0, 1, 2]]
+                root_pos = rot_vec.apply(root_pos).astype(self.dtype)
+                rotations = nn_transforms.get_rotation(rotations.astype(self.dtype), self.rot_req)
             
             root_pos_extra_dim = np.zeros((root_pos.shape[0], 1, self.per_rot_feat - 3), dtype=self.dtype)
             root_pos_extra_dim = torch.from_numpy(np.concatenate((root_pos[:, np.newaxis], root_pos_extra_dim), axis=2, dtype=self.dtype))
@@ -196,46 +244,28 @@ class MotionDataset(Dataset):
                 text_feature = self.global_conds['text_feature'][motion_idx]  # (512,) numpy array
             text_feature = torch.from_numpy(text_feature).float()  # 转换为tensor
             
-            # 确保traj_rotation是numpy array
-            if isinstance(traj_rotation, torch.Tensor):
-                traj_rotation_np = traj_rotation.cpu().numpy()
-            else:
-                traj_rotation_np = traj_rotation
-            
             return {
                 'data': future_motion,
                 'conditions': {
                     'past_motion': past_motion,
                     'text_feature': text_feature,
-                    'traj_pose': torch.from_numpy(traj_rotation_np),
-                    'traj_trans': torch.from_numpy(traj_pos),
+                    'traj_pose': traj_pose_tensor,
+                    'traj_trans': traj_trans_tensor,
                     'mask': torch.ones(future_motion.shape[0], dtype=torch.bool)
                 }
             }
         
         # qpos格式的处理
-        traj_rotation = self.local_conds['traj_pose'][motion_idx][random.choice(self.traj_aug_indexs1), frame_indices].copy()
-        
         root_pos = self.root_pos_list[motion_idx][frame_indices].copy()
-        root_pos[:, [0, 2]] -= root_pos[self.reference_frame_idx-1:self.reference_frame_idx, [0, 2]]
+        # 当past_frame=0时，使用第0帧作为参考；否则使用reference_frame_idx-1帧
+        ref_idx = max(0, self.reference_frame_idx - 1) if self.reference_frame_idx > 0 else 0
+        root_pos[:, [0, 2]] -= root_pos[ref_idx:ref_idx+1, [0, 2]]
         
-        traj_pos = root_pos[:, [0, 2]].copy()
-        random_option = np.random.random()
-        if random_option <0.5:
-            pass
-        elif random_option < 0.75:
-            traj_pos = gaussian_filter1d(traj_pos, 5, axis=0)
-        else:
-            traj_pos = gaussian_filter1d(traj_pos, 10, axis=0)
-        traj_pos -= traj_pos[self.reference_frame_idx-1:self.reference_frame_idx]
-
         # Random rotation augmentation (仿照四元数格式的处理)
         # 需要在切片之前进行旋转增强，使用完整长度的数据
         full_length = len(root_pos)
-        traj_rotation_xyzw = traj_rotation[..., [1, 2, 3, 0]]  # wxyz -> xyzw
         theta = np.repeat(np.random.uniform(0, 2*np.pi), full_length).astype(self.dtype)
         rot_vec = R.from_rotvec(np.pad(theta[..., np.newaxis], ((0, 0), (1, 1)), 'constant', constant_values=0))
-        traj_rotation = (rot_vec*R.from_quat(traj_rotation_xyzw)).as_quat()[..., [3, 0, 1, 2]]  # xyzw -> wxyz
         root_pos = rot_vec.apply(root_pos).astype(self.dtype)
         
         # 对root_quat应用旋转增强（qpos格式）
@@ -244,14 +274,34 @@ class MotionDataset(Dataset):
         root_quat = (rot_vec*R.from_quat(root_quat_xyzw)).as_quat()[..., [3, 0, 1, 2]]  # xyzw -> wxyz
         root_quat = root_quat.astype(self.dtype)
         
-        traj_pos_3d = np.zeros((full_length, 3), dtype=self.dtype)
-        traj_pos_3d[:, [0, 2]] = traj_pos
-        traj_pos = rot_vec.apply(traj_pos_3d)[:, [0, 2]].astype(self.dtype)
-        
-        # 注意：这里不切片，保持完整数据，最后再统一切片（与四元数格式分支保持一致）
-        # 将traj_rotation转换为训练所需的格式（6d格式） - 先转换完整数据
-        traj_rotation_full = traj_rotation.copy()
-        traj_rotation_full = nn_transforms.get_rotation(traj_rotation_full.astype(self.dtype), self.rot_req)
+        # 处理traj数据（如果为空则创建零张量）
+        if self.has_traj:
+            traj_rotation = self.local_conds['traj_pose'][motion_idx][random.choice(self.traj_aug_indexs1), frame_indices].copy()
+            
+            traj_pos = root_pos[:, [0, 2]].copy()
+            random_option = np.random.random()
+            if random_option <0.5:
+                pass
+            elif random_option < 0.75:
+                traj_pos = gaussian_filter1d(traj_pos, 5, axis=0)
+            else:
+                traj_pos = gaussian_filter1d(traj_pos, 10, axis=0)
+            traj_pos -= traj_pos[ref_idx:ref_idx+1]
+            
+            traj_rotation_xyzw = traj_rotation[..., [1, 2, 3, 0]]  # wxyz -> xyzw
+            traj_rotation = (rot_vec*R.from_quat(traj_rotation_xyzw)).as_quat()[..., [3, 0, 1, 2]]  # xyzw -> wxyz
+            
+            traj_pos_3d = np.zeros((full_length, 3), dtype=self.dtype)
+            traj_pos_3d[:, [0, 2]] = traj_pos
+            traj_pos = rot_vec.apply(traj_pos_3d)[:, [0, 2]].astype(self.dtype)
+            
+            # 将traj_rotation转换为训练所需的格式（6d格式） - 先转换完整数据
+            traj_rotation_full = traj_rotation.copy()
+            traj_rotation_full = nn_transforms.get_rotation(traj_rotation_full.astype(self.dtype), self.rot_req)
+        else:
+            # traj为空，创建零数组
+            traj_pos = np.zeros((full_length, 2), dtype=self.dtype)
+            traj_rotation_full = np.zeros((full_length, 6), dtype=self.dtype)  # 6D旋转格式
         
         # qpos格式：直接使用，转换为tensor
         # rotations是(frames, 29, 1)，完整长度
@@ -287,18 +337,16 @@ class MotionDataset(Dataset):
             text_feature = self.global_conds['text_feature'][motion_idx]  # (512,) numpy array
         text_feature = torch.from_numpy(text_feature).float()  # 转换为tensor
         
-        # 确保traj_rotation是numpy array
-        if isinstance(traj_rotation, torch.Tensor):
-            traj_rotation_np = traj_rotation.cpu().numpy()
-        else:
-            traj_rotation_np = traj_rotation
+        # 转换为tensor
+        traj_pose_tensor = torch.from_numpy(traj_rotation.astype(self.dtype)).float()
+        traj_trans_tensor = torch.from_numpy(traj_pos.astype(self.dtype)).float()
         
         return {
             'data': future_motion,
             'conditions': {
                 'past_motion': past_motion,
-                'traj_pose': torch.from_numpy(traj_rotation_np),
-                'traj_trans': torch.from_numpy(traj_pos),
+                'traj_pose': traj_pose_tensor,
+                'traj_trans': traj_trans_tensor,
                 'text_feature': text_feature,
                 'mask': torch.ones(future_motion.shape[0], dtype=torch.bool)
             }

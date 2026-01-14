@@ -3,8 +3,15 @@ parsing joint_vec into pkl for diffusion training:
     --output_path data/pkls/synthetic_en.pkl
 
 
-    python data/make_pose_data.py
+    
+
+
+
+processing g1ml3d:
     python data/process_g1ml3d.py
+
+processing 100style:
+    python data/make_pose_data.py
 
 
 # 单卡训练（调试模式）
@@ -20,6 +27,13 @@ python -m torch.distributed.launch --nproc_per_node=8 train.py \
 python train.py -n camdm --epoch 20 --batch_size 512 --diffusion_steps 4 \
     --distributed --world_size 8 \
      -i data/pkls/100style_g1.pkl
+
+# HumanML3D数据集训练（past_frame=0，future_frame根据数据集实际长度设置）
+# 注意：future_frame应该设置为数据集中序列的实际长度（例如196帧）
+python train.py -n camdm_humanml3d --epoch 1000 --batch_size 512 --diffusion_steps 4 \
+    --distributed --world_size 8 \
+    --past_frame 0 --future_frame 128 \
+    -i data/pkls/g1ml3d_train.pkl
 
 
 python data/process_bvh.py

@@ -71,7 +71,7 @@ def config_parse(args):
     config.trainer.use_loss_vel = True if loss_terms[2] == '1' else False
     config.trainer.use_loss_contact = True if loss_terms[3] == '1' else False
     config.trainer.load_num = -1
-    config.trainer.save_freq = int(config.trainer.epoch // 10)
+    config.trainer.save_freq = 5
 
     data_prefix = args.data.split('/')[-1].split('.')[0]
     config.save = '%s/%s_%s' % (args.save, args.name, data_prefix) if 'debug' not in config.name else '%s/%s' % (args.save, args.name)

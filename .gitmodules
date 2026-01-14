@@ -1,0 +1,3 @@
+[submodule "external/GMR-galbot"]
+	path = external/GMR-galbot
+	url = https://github.com/ritsu-a/GMR-galbot.git
