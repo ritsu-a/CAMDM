@@ -3,8 +3,11 @@ parsing joint_vec into pkl for diffusion training:
     --output_path data/pkls/synthetic_en.pkl
 
 
+    python data/make_pose_data.py
+
+
 # 单卡训练（调试模式）
-python train.py -n camdm --epoch 100 --batch_size 512 --diffusion_steps 4 -i data/pkls/100style_g1.pkl 
+python train.py -n camdm --epoch 20 --batch_size 512 --diffusion_steps 4 -i data/pkls/100style_g1.pkl 
 
 # 8卡并行训练（使用torch.distributed.launch）
 python -m torch.distributed.launch --nproc_per_node=8 train.py \
@@ -13,7 +16,7 @@ python -m torch.distributed.launch --nproc_per_node=8 train.py \
     -c ./config/baseline_g1.json -i data/pkls/100style_g1.pkl
 
 # 或者使用multiprocessing启动（推荐，自动处理进程）
-python train.py -n camdm --epoch 100 --batch_size 512 --diffusion_steps 4 \
+python train.py -n camdm --epoch 20 --batch_size 512 --diffusion_steps 4 \
     --distributed --world_size 8 \
      -i data/pkls/100style_g1.pkl
 

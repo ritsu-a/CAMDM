@@ -40,7 +40,7 @@ class MotionDataset(Dataset):
         self.past_frame = past_frame
         self.rotations_list, self.root_pos_list = [], []
         self.local_conds = {'traj_pose': [], 'traj_trans': []}
-        self.global_conds = {'style': []}
+        self.global_conds = {'style': [], 'text': [], 'text_feature': []}
         
         self.rot_feat_dim = {'q': 4, '6d': 6, 'euler': 3, 'qpos': 1}
         self.reference_frame_idx = past_frame
@@ -79,6 +79,14 @@ class MotionDataset(Dataset):
             self.local_conds['traj_trans'].append(np.array([item for item in motion_item['traj']], dtype=dtype))
             
             self.global_conds['style'].append(motion_item['style'])
+            # 保存文本信息，如果不存在则使用style作为文本
+            text = motion_item.get('text', motion_item['style'])
+            self.global_conds['text'].append(text)
+            # 加载预计算的CLIP特征，如果不存在则报错（需要先运行make_pose_data.py预处理）
+            if 'text_feature' in motion_item:
+                self.global_conds['text_feature'].append(motion_item['text_feature'].astype(np.float32))
+            else:
+                raise ValueError(f"text_feature not found in motion_item. Please run make_pose_data.py to precompute CLIP features.")
 
             clip_indices = np.arange(0, frame_num - window_size + 1, offset_frame)[:, None] + np.arange(window_size)
             clip_indices_with_idx = np.hstack((np.full((len(clip_indices), 1), motion_idx, dtype=clip_indices.dtype), clip_indices))            
@@ -100,6 +108,7 @@ class MotionDataset(Dataset):
         self.mask = np.ones(window_size - self.reference_frame_idx, dtype=bool)
         self.style_set = sorted(list(set(self.global_conds['style'])))
         print('Dataset loaded, trained with %d clips, %d frames, %d mins in total' % (len(frame_nums), sum([item[1] for item in frame_nums]), sum([item[1] for item in frame_nums])/30/60))
+        print('Using precomputed CLIP text features instead of style idx')
         
         
     def __len__(self):
@@ -169,7 +178,9 @@ class MotionDataset(Dataset):
             future_motion = rotations_with_root[self.reference_frame_idx:]
             past_motion = rotations_with_root[:self.reference_frame_idx]
             
-            style_idx = float(self.style_set.index(self.global_conds['style'][motion_idx]))
+            # 直接使用预计算的CLIP特征
+            text_feature = self.global_conds['text_feature'][motion_idx]  # (512,) numpy array
+            text_feature = torch.from_numpy(text_feature).float()  # 转换为tensor
             
             # 确保traj_rotation是numpy array
             if isinstance(traj_rotation, torch.Tensor):
@@ -181,7 +192,7 @@ class MotionDataset(Dataset):
                 'data': future_motion,
                 'conditions': {
                     'past_motion': past_motion,
-                    'style_idx': torch.tensor(style_idx, dtype=torch.long),
+                    'text_feature': text_feature,
                     'traj_pose': torch.from_numpy(traj_rotation_np),
                     'traj_trans': torch.from_numpy(traj_pos),
                     'mask': torch.ones(future_motion.shape[0], dtype=torch.bool)
@@ -252,7 +263,9 @@ class MotionDataset(Dataset):
         traj_rotation = traj_rotation_full[self.reference_frame_idx:]
         traj_pos = traj_pos[self.reference_frame_idx:]
     
-        style_idx = float(self.style_set.index(self.global_conds['style'][motion_idx]))
+        # 直接使用预计算的CLIP特征
+        text_feature = self.global_conds['text_feature'][motion_idx]  # (512,) numpy array
+        text_feature = torch.from_numpy(text_feature).float()  # 转换为tensor
         
         # 确保traj_rotation是numpy array
         if isinstance(traj_rotation, torch.Tensor):
@@ -266,7 +279,7 @@ class MotionDataset(Dataset):
                 'past_motion': past_motion,
                 'traj_pose': torch.from_numpy(traj_rotation_np),
                 'traj_trans': torch.from_numpy(traj_pos),
-                'style_idx': torch.tensor(style_idx, dtype=torch.long),
+                'text_feature': text_feature,
                 'mask': torch.ones(future_motion.shape[0], dtype=torch.bool)
             }
         }     

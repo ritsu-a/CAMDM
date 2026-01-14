@@ -2,10 +2,11 @@ import numpy as np
 import torch
 from torch.nn import functional as F
 import torch.nn as nn
+import clip
 
 
 class MotionDiffusion(nn.Module):
-    def __init__(self, input_feats, nstyles, njoints, nfeats, rot_req, clip_len,
+    def __init__(self, input_feats, njoints, nfeats, rot_req, clip_len,
                  latent_dim=256, ff_size=1024, num_layers=8, num_heads=4, dropout=0.2,
                  ablation=None, activation="gelu", legacy=False, 
                  arch='trans_enc', cond_mask_prob=0, device=None):
@@ -38,7 +39,9 @@ class MotionDiffusion(nn.Module):
         self.sequence_pos_encoder = PositionalEncoding(self.latent_dim, self.dropout)
 
         # global conditions
-        self.embed_style = EmbedStyle(nstyles, self.latent_dim)
+        # CLIP文本特征维度是512，需要映射到latent_dim
+        self.text_feature_dim = 512  # CLIP ViT-B/16的文本特征维度
+        self.text_feature_proj = nn.Linear(self.text_feature_dim, self.latent_dim)
         self.embed_timestep = TimestepEmbedder(self.latent_dim, self.sequence_pos_encoder)
 
         if self.arch == 'trans_enc':
@@ -71,18 +74,19 @@ class MotionDiffusion(nn.Module):
         self.output_process = OutputProcess(self.input_feats, self.latent_dim, self.njoints, self.nfeats)
 
 
-    def forward(self, x, timesteps, past_motion, traj_pose, traj_trans, style_idx):
+    def forward(self, x, timesteps, past_motion, traj_pose, traj_trans, text_feature):
         bs, njoints, nfeats, nframes = x.shape
         
         time_emb = self.embed_timestep(timesteps)  # [1, bs, L]
-        style_emb = self.embed_style(style_idx).unsqueeze(0)  # [1, bs, L]
+        # 将CLIP文本特征投影到latent_dim维度
+        text_emb = self.text_feature_proj(text_feature).unsqueeze(0)  # [1, bs, L]
         traj_trans_emb = self.traj_trans_process(traj_trans) # [N/2, bs, L] 
         traj_pose_emb = self.traj_pose_process(traj_pose) # [N/2, bs, L] 
         past_motion_emb = self.past_motion_process(past_motion)  # [past_frames, bs, L] 
         
         future_motion_emb = self.future_motion_process(x) 
         
-        xseq = torch.cat((time_emb, style_emb, 
+        xseq = torch.cat((time_emb, text_emb, 
                           traj_trans_emb, traj_pose_emb,
                           past_motion_emb, future_motion_emb), axis=0)
         
@@ -100,7 +104,7 @@ class MotionDiffusion(nn.Module):
         """
         bs, njoints, nfeats, nframes = x.shape
         
-        style_idx = y['style_idx'] 
+        text_feature = y['text_feature']  # [bs, 512]
         past_motion = y['past_motion']
         traj_pose = y['traj_pose']
         traj_trans = y['traj_trans']
@@ -109,7 +113,7 @@ class MotionDiffusion(nn.Module):
         keep_batch_idx = torch.rand(bs, device=past_motion.device) < (1-self.cond_mask_prob)
         past_motion = past_motion * keep_batch_idx.view((bs, 1, 1, 1))
         
-        return self.forward(x, timesteps, past_motion, traj_pose, traj_trans, style_idx)
+        return self.forward(x, timesteps, past_motion, traj_pose, traj_trans, text_feature)
     
 
 class MotionProcess(nn.Module):
@@ -198,12 +202,3 @@ class OutputProcess(nn.Module):
         return output
     
     
-class EmbedStyle(nn.Module):
-    def __init__(self, num_actions, latent_dim):
-        super().__init__()
-        self.action_embedding = nn.Parameter(torch.randn(num_actions, latent_dim))
-
-    def forward(self, input):
-        idx = input.to(torch.long) 
-        output = self.action_embedding[idx]
-        return output

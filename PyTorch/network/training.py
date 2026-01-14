@@ -85,6 +85,7 @@ class BaseTrainingPortal:
             for datas in self.dataloader:
                 datas = {key: val.to(self.device) if torch.is_tensor(val) else val for key, val in datas.items()}
                 cond = {key: val.to(self.device) if torch.is_tensor(val) else val for key, val in datas['conditions'].items()}
+
                 x_start = datas['data']
 
                 self.opt.zero_grad()
@@ -384,24 +385,6 @@ class MotionTrainingPortal(BaseTrainingPortal):
                     
                     # root_quat从feature中提取（wxyz格式）
                     root_quat_sample = root_quat[sample_idx]  # (frames, 4) - wxyz格式
-                else:
-                    # 从四元数转换为角度
-                    root_quat_sample = rotations_quat[sample_idx, :, 0, :]  # (frames, 4) - 根关节四元数 (wxyz格式)
-                    joint_quats = rotations_quat[sample_idx, :, 1:, :]  # (frames, 29, 4) - 其他关节四元数
-                    
-                    # 将其他关节的四元数转换为角度（绕Z轴旋转）
-                    from scipy.spatial.transform import Rotation as R
-                    joint_angles = np.zeros((total_frames, 29), dtype=np.float32)
-                    for j in range(29):
-                        quat_xyzw = joint_quats[:, j, [1, 2, 3, 0]]  # wxyz -> xyzw (scipy使用xyzw格式)
-                        try:
-                            # 从四元数提取Z轴旋转角度
-                            r = R.from_quat(quat_xyzw)
-                            angles = r.as_euler('xyz', degrees=False)  # 获取xyz欧拉角
-                            joint_angles[:, j] = angles[:, 2]  # 只取Z轴角度
-                        except:
-                            # 如果转换失败，使用0角度
-                            joint_angles[:, j] = 0.0
                 
                 # 注意：root_pos和root_quat是Y-up格式（因为pkl中保存的是Y-up）
                 # 需要转换为Z-up格式

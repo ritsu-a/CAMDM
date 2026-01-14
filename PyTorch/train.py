@@ -105,8 +105,7 @@ def train(config, resume, logger, tb_writer, rank=0, world_size=1, distributed=F
         input_feats = (train_data.joint_num+1) * train_data.per_rot_feat   # use the root translation as an extra joint
         actual_joint_num = train_data.joint_num
         actual_per_rot_feat = train_data.per_rot_feat
-
-    model = MotionDiffusion(input_feats, len(train_data.style_set),
+    model = MotionDiffusion(input_feats,
                 actual_joint_num+1, actual_per_rot_feat, 
                 config.arch.rot_req, config.arch.clip_len,
                 config.arch.latent_dim, config.arch.ff_size, 

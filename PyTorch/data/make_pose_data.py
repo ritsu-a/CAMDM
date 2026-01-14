@@ -5,6 +5,8 @@ import os
 import pickle
 import copy
 import numpy as np
+import torch
+import clip
 import utils.motion_modules as motion_modules
 import style_helper as style100
 from scipy.ndimage import gaussian_filter1d
@@ -759,6 +761,13 @@ if __name__ == '__main__':
     export_path = 'data/pkls/100style_g1.pkl'
     style_metas = style100.get_info(data_root, meta_file='Dataset_List.csv')
     
+    # 加载CLIP模型用于文本编码
+    print('Loading CLIP model for text feature extraction...')
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    clip_model, _ = clip.load("ViT-B/16", device=device)
+    clip_model.eval()
+    print(f'CLIP model loaded on {device}')
+    
     data_list = {
         'parents': None,
         'offsets': None,
@@ -816,6 +825,14 @@ if __name__ == '__main__':
         motion, motion_data = process_npz_motion(motion)
         motion_data['text'] = meta_info['description'].lower()
         motion_data['style'] = style_name
+        
+        # 计算并保存CLIP文本特征
+        text = motion_data['text']
+        text_tokens = clip.tokenize([text], truncate=True).to(device)
+        with torch.no_grad():
+            text_features = clip_model.encode_text(text_tokens).float().cpu().numpy()  # (1, 512)
+        motion_data['text_feature'] = text_features[0]  # (512,) numpy array
+        
         data_list['motions'].append(motion_data)
         
         # NPZ数据不需要处理镜像
