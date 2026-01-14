@@ -36,6 +36,14 @@ class BaseTrainingPortal:
         print('Train with %d epoches, %d batches by %d batch_size' % (self.num_epochs, len(self.dataloader), self.batch_size))
 
         self.save_dir = config.save
+        
+        # 分布式训练相关属性（在train函数中设置）
+        self.rank = getattr(self, 'rank', 0)
+        self.world_size = getattr(self, 'world_size', 1)
+        self.distributed = getattr(self, 'distributed', False)
+        
+        # 获取实际模型（如果是DDP包装的，返回module；否则返回模型本身）
+        self.get_model = lambda: self.model.module if self.distributed else self.model
 
         self.opt = AdamW(self.model.parameters(), lr=self.lr, weight_decay=config.trainer.weight_decay)
         self.scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(self.opt, T_max=self.num_epochs, eta_min=self.lr * 0.1)
@@ -129,7 +137,8 @@ class BaseTrainingPortal:
                 self.best_loss = epoch_avg_loss
             
             epoch_process_bar.set_description(f'Epoch {epoch_idx}/{self.config.trainer.epoch} | loss: {epoch_avg_loss:.6f} | best_loss: {self.best_loss:.6f}')
-            self.logger.info(f'Epoch {epoch_idx}/{self.config.trainer.epoch} | {loss_str} | best_loss: {self.best_loss:.6f}')
+            if self.logger:
+                self.logger.info(f'Epoch {epoch_idx}/{self.config.trainer.epoch} | {loss_str} | best_loss: {self.best_loss:.6f}')
                         
             if epoch_idx > 0 and epoch_idx % self.config.trainer.save_freq == 0:
                 self.save_checkpoint(filename=f'weights_{epoch_idx}')
@@ -137,7 +146,8 @@ class BaseTrainingPortal:
             
             for key_name in epoch_losses.keys():
                 if 'loss' in key_name:
-                    self.tb_writer.add_scalar(f'train/{key_name}', np.mean(epoch_losses[key_name]), epoch_idx)
+                    if self.tb_writer:
+                        self.tb_writer.add_scalar(f'train/{key_name}', np.mean(epoch_losses[key_name]), epoch_idx)
 
             self.scheduler.step()
         
@@ -147,7 +157,8 @@ class BaseTrainingPortal:
 
 
     def state_dict(self):
-        model_state = self.model.state_dict()
+        model = self.get_model()
+        model_state = model.state_dict()
         opt_state = self.opt.state_dict()
             
         return {
@@ -159,21 +170,27 @@ class BaseTrainingPortal:
         }
 
     def save_checkpoint(self, filename='weights'):
+        # 分布式训练时只在rank 0上保存checkpoint
+        if self.distributed and self.rank != 0:
+            return
         save_path = '%s/%s.pt' % (self.config.save, filename)
         with bf.BlobFile(bf.join(save_path), "wb") as f:
             torch.save(self.state_dict(), f)
-        self.logger.info(f'Saved checkpoint: {save_path}')
+        if self.logger:
+            self.logger.info(f'Saved checkpoint: {save_path}')
 
 
     def load_checkpoint(self, resume_checkpoint, load_hyper=True):
         if bf.exists(resume_checkpoint):
             checkpoint = torch.load(resume_checkpoint)
-            self.model.load_state_dict(checkpoint['state_dict'])
+            model = self.get_model()
+            model.load_state_dict(checkpoint['state_dict'])
             if load_hyper:
                 self.epoch = checkpoint['epoch'] + 1
                 self.best_loss = checkpoint['loss']
                 self.opt.load_state_dict(checkpoint['opt_state_dict'])
-            self.logger.info('\nLoad checkpoint from %s, start at epoch %d, loss: %.4f' % (resume_checkpoint, self.epoch, checkpoint['loss']))
+            if self.logger:
+                self.logger.info('\nLoad checkpoint from %s, start at epoch %d, loss: %.4f' % (resume_checkpoint, self.epoch, checkpoint['loss']))
         else:
             raise FileNotFoundError(f'No checkpoint found at {resume_checkpoint}')
 
@@ -182,21 +199,18 @@ class MotionTrainingPortal(BaseTrainingPortal):
     def __init__(self, config, model, diffusion, dataloader, logger, tb_writer, finetune_loader=None):
         super().__init__(config, model, diffusion, dataloader, logger, tb_writer, finetune_loader)
         # 检查 T_pose 是否有 offsets 和 parents 属性（NPZMotion 没有这些）
-        T_pose = self.dataloader.dataset.T_pose
-        if hasattr(T_pose, 'offsets') and hasattr(T_pose, 'parents'):
-            self.skel_offset = torch.from_numpy(T_pose.offsets).to(self.device)
-            self.skel_parents = T_pose.parents
-            self.has_skeleton_info = True
-        else:
-            # NPZMotion 没有 offsets 和 parents，设置为 None
-            self.skel_offset = None
-            self.skel_parents = None
-            self.has_skeleton_info = False
-            # 如果尝试使用 3D loss，需要关闭它
-            if self.config.trainer.use_loss_3d or self.config.trainer.use_loss_contact:
+
+ 
+        # NPZMotion 没有 offsets 和 parents，设置为 None
+        self.skel_offset = None
+        self.skel_parents = None
+        self.has_skeleton_info = False
+        # 如果尝试使用 3D loss，需要关闭它
+        if self.config.trainer.use_loss_3d or self.config.trainer.use_loss_contact:
+            if self.logger:
                 self.logger.info('Warning: T_pose has no offsets/parents, disabling use_loss_3d and use_loss_contact')
-                self.config.trainer.use_loss_3d = False
-                self.config.trainer.use_loss_contact = False
+            self.config.trainer.use_loss_3d = False
+            self.config.trainer.use_loss_contact = False
         
 
     def diffuse(self, x_start, t, cond, noise=None, return_loss=False):
@@ -205,7 +219,7 @@ class MotionTrainingPortal(BaseTrainingPortal):
             # qpos格式: (batch, frame_num, joint_num * joint_feat)
             batch_size, frame_num, total_feat = x_start.shape
             # 假设joint_feat=1（qpos），需要reshape
-            # 如果total_feat=32，可能是29个qpos + 3个root_pos
+            # 如果total_feat=36，是29个qpos + 3个root_pos + 4个root_quat
             joint_num = total_feat
             joint_feat = 1
             x_start = x_start.unsqueeze(-1)  # (batch, frame_num, joint_num, 1)
@@ -224,7 +238,8 @@ class MotionTrainingPortal(BaseTrainingPortal):
         cond['traj_pose'] = cond['traj_pose'].permute(0, 2, 1) # [bs, 6, frame_num//2]
         cond['traj_trans'] = cond['traj_trans'].permute(0, 2, 1) # [bs, 2, frame_num//2]
         
-        model_output = self.model.interface(x_t, self.diffusion._scale_timesteps(t), cond)
+        model = self.get_model()
+        model_output = model.interface(x_t, self.diffusion._scale_timesteps(t), cond)
         
         if return_loss:
             loss_terms = {}
@@ -299,6 +314,9 @@ class MotionTrainingPortal(BaseTrainingPortal):
         
     
     def evaluate_sampling(self, dataloader, save_folder_name):
+        # 分布式训练时只在rank 0上评估和保存样本
+        if self.distributed and self.rank != 0:
+            return
         self.model.eval()
         self.model.training = False
         common.mkdir('%s/%s' % (self.save_dir, save_folder_name))
@@ -315,21 +333,23 @@ class MotionTrainingPortal(BaseTrainingPortal):
         self.export_samples(x_start, common_past_motion, '%s/%s/' % (self.save_dir, save_folder_name), 'gt')
         self.export_samples(model_output, common_past_motion, '%s/%s/' % (self.save_dir, save_folder_name), 'pred')
         
-        self.logger.info(f'Evaluate the sampling {save_folder_name} at epoch {self.epoch}')
+        if self.logger:
+            self.logger.info(f'Evaluate the sampling {save_folder_name} at epoch {self.epoch}')
         
 
     def export_samples(self, future_motion_feature, past_motion_feature, save_path, prefix):
         motion_feature = torch.cat((past_motion_feature, future_motion_feature), dim=1)
         
         # 检查数据格式：qpos 格式 vs 传统旋转格式
-        # qpos 格式：(batch, frames, 32, 1) - 29 qpos + 3 root_pos
+        # qpos 格式：(batch, frames, 36, 1) - 29 qpos + 3 root_pos + 4 root_quat
         # 传统格式：(batch, frames, joint_num, 6) - 6D 旋转
         batch_size, total_frames, feature_dim, feat_size = motion_feature.shape
         
-        if feat_size == 1 and feature_dim == 32:
-            # qpos 格式
+        if feat_size == 1 and feature_dim == 36:
+            # qpos 格式（包含root_quat）
             qpos_angles = motion_feature[:, :, :29, 0].cpu().numpy()  # (batch, frames, 29)
             root_pos = motion_feature[:, :, 29:32, 0].cpu().numpy()  # (batch, frames, 3)
+            root_quat = motion_feature[:, :, 32:36, 0].cpu().numpy()  # (batch, frames, 4) - wxyz格式
             is_qpos_format = True
         else:
             # 传统 6D 旋转格式
@@ -344,21 +364,29 @@ class MotionTrainingPortal(BaseTrainingPortal):
         
         if not self.has_skeleton_info:
             # NPZMotion：导出为 NPZ 格式，格式与load_npz_motion读取时一致
-            T_pose = self.dataloader.dataset.T_pose
-            joint_names = T_pose.names if hasattr(T_pose, 'names') else [f'joint_{i}' for i in range(29)]
+            # 使用默认的g1关节名称（29个关节）
+            joint_names = [
+                'left_hip_pitch_joint', 'left_hip_roll_joint', 'left_hip_yaw_joint',
+                'left_knee_joint', 'left_ankle_pitch_joint', 'left_ankle_roll_joint',
+                'right_hip_pitch_joint', 'right_hip_roll_joint', 'right_hip_yaw_joint',
+                'right_knee_joint', 'right_ankle_pitch_joint', 'right_ankle_roll_joint',
+                'waist_yaw_joint', 'waist_roll_joint', 'waist_pitch_joint',
+                'left_shoulder_pitch_joint', 'left_shoulder_roll_joint', 'left_shoulder_yaw_joint',
+                'left_elbow_joint', 'left_wrist_roll_joint', 'left_wrist_pitch_joint', 'left_wrist_yaw_joint',
+                'right_shoulder_pitch_joint', 'right_shoulder_roll_joint', 'right_shoulder_yaw_joint',
+                'right_elbow_joint', 'right_wrist_roll_joint', 'right_wrist_pitch_joint', 'right_wrist_yaw_joint'
+            ]
             
             for sample_idx in range(future_motion_feature.shape[0]):
                 if is_qpos_format:
                     # 直接使用 qpos 数据，不需要从四元数转换
                     joint_angles = qpos_angles[sample_idx]  # (frames, 29)
                     
-                    # 构建根关节四元数（假设为单位四元数，表示无旋转）
-                    # 如果需要从轨迹中提取根旋转，需要额外处理
-                    root_quat = np.zeros((total_frames, 4), dtype=np.float32)
-                    root_quat[:, 0] = 1.0  # w=1，单位四元数
+                    # root_quat从feature中提取（wxyz格式）
+                    root_quat_sample = root_quat[sample_idx]  # (frames, 4) - wxyz格式
                 else:
                     # 从四元数转换为角度
-                    root_quat = rotations_quat[sample_idx, :, 0, :]  # (frames, 4) - 根关节四元数 (wxyz格式)
+                    root_quat_sample = rotations_quat[sample_idx, :, 0, :]  # (frames, 4) - 根关节四元数 (wxyz格式)
                     joint_quats = rotations_quat[sample_idx, :, 1:, :]  # (frames, 29, 4) - 其他关节四元数
                     
                     # 将其他关节的四元数转换为角度（绕Z轴旋转）
@@ -375,41 +403,101 @@ class MotionTrainingPortal(BaseTrainingPortal):
                             # 如果转换失败，使用0角度
                             joint_angles[:, j] = 0.0
                 
+                # 注意：root_pos和root_quat是Y-up格式（因为pkl中保存的是Y-up）
+                # 需要转换为Z-up格式
+                # 定义坐标系转换函数（避免导入make_pose_data时触发style_helper依赖）
+                from scipy.spatial.transform import Rotation as R
+                
+                def convert_y_up_to_z_up(positions, quaternions=None):
+                    """
+                    将坐标系从+Y朝上（BVH/Y-up）转换回+Z朝上（OpenGL/Z-up）
+                    转换规则：(x, y, z) -> (x, -z, y)
+                    对于四元数：需要相应的旋转变换（绕X轴旋转+90度）
+                    """
+                    # 位置转换：(x, y, z) -> (x, -z, y)
+                    converted_positions = np.zeros_like(positions)
+                    converted_positions[..., 0] = positions[..., 0]  # X保持不变
+                    converted_positions[..., 1] = -positions[..., 2]  # Y <- -Z（前）
+                    converted_positions[..., 2] = positions[..., 1]  # Z <- Y（上）
+                    
+                    if quaternions is not None:
+                        # 确保quaternions是2D数组 (frames, 4)
+                        quaternions = np.asarray(quaternions)
+                        if quaternions.ndim == 1:
+                            quaternions = quaternions.reshape(1, -1)
+                        
+                        # 四元数转换：绕X轴旋转+90度，将Y-up转换回Z-up
+                        convert_quat = R.from_euler('x', np.pi/2).as_quat()  # xyzw格式
+                        
+                        converted_quaternions = np.zeros_like(quaternions)
+                        for i in range(quaternions.shape[0]):
+                            # 当前四元数（wxyz格式）转换为xyzw格式进行运算
+                            q_wxyz = quaternions[i]  # (4,)
+                            q_xyzw = q_wxyz[[1, 2, 3, 0]]  # wxyz -> xyzw
+                            # 应用坐标转换旋转
+                            q_rotated = (R.from_quat(convert_quat) * R.from_quat(q_xyzw)).as_quat()
+                            # 转回wxyz格式
+                            converted_quaternions[i] = q_rotated[[3, 0, 1, 2]]
+                        
+                        # 如果原始quaternions是1D，返回1D结果
+                        if converted_quaternions.shape[0] == 1 and quaternions.ndim == 1:
+                            converted_quaternions = converted_quaternions[0]
+                        
+                        return converted_positions, converted_quaternions
+                    
+                    return converted_positions
+                
+                # 转换根位置和根四元数（Y-up -> Z-up）
+                root_pos_yup = root_pos[sample_idx]  # (frames, 3) - Y-up格式
+                root_pos_yup_reshaped = root_pos_yup.reshape(-1, 1, 3)  # (frames, 1, 3)
+                root_quat_yup = root_quat_sample  # (frames, 4) - Y-up格式，已经在上面索引过了
+                
+                # 转换（返回converted_positions, converted_quaternions）
+                root_pos_zup_reshaped, root_quat_zup = convert_y_up_to_z_up(
+                    root_pos_yup_reshaped,
+                    root_quat_yup
+                )
+                root_pos_zup = root_pos_zup_reshaped.reshape(-1, 3)  # (frames, 3) - Z-up格式
+                
                 # 构建 qpos：根位置(3) + 根旋转四元数(4) + 关节角度(29) = 36
+                # 注意：保存为Z-up格式
                 qpos = np.zeros((total_frames, 36), dtype=np.float32)
-                qpos[:, 0:3] = root_pos[sample_idx]  # 根位置
-                qpos[:, 3:7] = root_quat  # 根旋转四元数 (wxyz格式)
-                qpos[:, 7:] = joint_angles  # 29个关节的角度
+                qpos[:, 0:3] = root_pos_zup  # 根位置（Z-up格式）
+                qpos[:, 3:7] = root_quat_zup  # 根旋转四元数 (wxyz格式，Z-up)
+                qpos[:, 7:] = joint_angles  # 29个关节的角度（不受坐标系影响）
                 
                 # 创建 global_body_pos: (frames, 30, 3) - 第一个是root，后面是29个关节
                 # 注意：这里我们没有完整的全局位置信息，所以只保存根位置，其他设为0
-                # 如果需要完整的global_body_pos，需要通过FK计算
+                # 数据已经是Z-up格式
                 global_body_pos = np.zeros((total_frames, 30, 3), dtype=np.float32)
-                global_body_pos[:, 0, :] = root_pos[sample_idx]  # 根位置
+                global_body_pos[:, 0, :] = root_pos_zup  # 根位置（Z-up格式）
                 # 其他关节位置暂时设为0（如果需要可以通过FK计算）
                 
-                # 创建 NPZ 数据，格式与load_npz_motion读取时一致
+                # 创建 NPZ 数据，格式与load_npz_motion读取时一致（Z-up格式）
                 npz_data = {
-                    'qpos': qpos,  # (frames, 36)
-                    'global_body_pos': global_body_pos,  # (frames, 30, 3)
+                    'qpos': qpos,  # (frames, 36) - Z-up格式
+                    'global_body_pos': global_body_pos,  # (frames, 30, 3) - Z-up格式
                     'joint_names': np.array(['root'] + joint_names, dtype=object),  # (30,)
                     'jnt_type': np.array([0] + [3] * 29, dtype=np.int32),  # (30,) - 0=free joint, 3=hinge joint
+                    'frequency': 60.0,  # 60fps
+                    'njnt': 30,
                 }
                 
                 output_path = f'{save_path}/motion_{sample_idx}.{prefix}.npz'
                 os.makedirs(os.path.dirname(output_path), exist_ok=True)
                 np.savez(output_path, **npz_data)
                 if self.logger:
-                    self.logger.info(f'Exported NPZ: {output_path}')
+                    self.logger.info(f'Exported NPZ (Z-up): {output_path}')
                 else:
-                    print(f'Exported NPZ: {output_path}')
+                    print(f'Exported NPZ (Z-up): {output_path}')
         else:
             # Motion类：导出为 BVH 格式
             if not is_qpos_format:
                 rotations = rotations_quat  # 已经在前面转换为四元数
             else:
                 # 不应该发生，qpos格式应该与has_skeleton_info=False对应
-                self.logger.warning('Unexpected: qpos format with skeleton info available')
+                if self.logger:
+                    self.logger.warning('Unexpected: qpos format with skeleton info available')
                 return
             
             for sample_idx in range(future_motion_feature.shape[0]):

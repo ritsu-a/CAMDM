@@ -47,7 +47,6 @@ class MotionDataset(Dataset):
         
         data_source = pickle.load(open(pkl_path, 'rb'))
 
-        self.T_pose = data_source['T_pose']
         frame_nums = []
         item_frame_indices_list = [] # store the frame index for each clip. shape = 1 + window_size, 1 represent the motion idx
         motion_idx = 0
@@ -112,9 +111,20 @@ class MotionDataset(Dataset):
         
         # 获取旋转数据，可能是qpos格式或四元数格式
         rotations_data = self.rotations_list[motion_idx]
+        root_quat = None  # 初始化为None，在qpos格式分支中设置
+        
         if isinstance(rotations_data, dict):
             # qpos格式：直接使用qpos，不转换为旋转
             qpos = rotations_data['qpos'][frame_indices].copy().astype(self.dtype)  # (frames, 29)
+            
+            # 获取root_quat（如果存在）
+            root_quat_raw = rotations_data.get('root_quat', None)
+            if root_quat_raw is not None:
+                root_quat = root_quat_raw[frame_indices].copy().astype(self.dtype)  # (frames, 4) - wxyz格式
+            else:
+                # 如果没有root_quat，使用单位四元数
+                root_quat = np.zeros((len(frame_indices), 4), dtype=self.dtype)
+                root_quat[:, 0] = 1.0  # w=1
             
             rotations = qpos[..., None]  # (frames, 29， 1)
         else:
@@ -202,33 +212,45 @@ class MotionDataset(Dataset):
         rot_vec = R.from_rotvec(np.pad(theta[..., np.newaxis], ((0, 0), (1, 1)), 'constant', constant_values=0))
         traj_rotation = (rot_vec*R.from_quat(traj_rotation_xyzw)).as_quat()[..., [3, 0, 1, 2]]  # xyzw -> wxyz
         root_pos = rot_vec.apply(root_pos).astype(self.dtype)
+        
+        # 对root_quat应用旋转增强（qpos格式）
+        # root_quat已经在qpos格式分支中初始化了
+        root_quat_xyzw = root_quat[..., [1, 2, 3, 0]]  # wxyz -> xyzw
+        root_quat = (rot_vec*R.from_quat(root_quat_xyzw)).as_quat()[..., [3, 0, 1, 2]]  # xyzw -> wxyz
+        root_quat = root_quat.astype(self.dtype)
+        
         traj_pos_3d = np.zeros((full_length, 3), dtype=self.dtype)
         traj_pos_3d[:, [0, 2]] = traj_pos
         traj_pos = rot_vec.apply(traj_pos_3d)[:, [0, 2]].astype(self.dtype)
         
-        # 切片：只取reference_frame_idx之后的数据
-        traj_rotation = traj_rotation[self.reference_frame_idx:]
-        traj_pos = traj_pos[self.reference_frame_idx:]
-        
-        # 将traj_rotation转换为训练所需的格式（6d格式）
-        traj_rotation = nn_transforms.get_rotation(traj_rotation.astype(self.dtype), self.rot_req)
+        # 注意：这里不切片，保持完整数据，最后再统一切片（与四元数格式分支保持一致）
+        # 将traj_rotation转换为训练所需的格式（6d格式） - 先转换完整数据
+        traj_rotation_full = traj_rotation.copy()
+        traj_rotation_full = nn_transforms.get_rotation(traj_rotation_full.astype(self.dtype), self.rot_req)
         
         # qpos格式：直接使用，转换为tensor
-        # rotations是(frames, 29, 1)
-        # 添加root_pos (frames, 3, 1)
-        rotations_tensor = torch.from_numpy(rotations.astype(self.dtype))  # (frames, 29, 1)
-        root_pos_tensor = torch.from_numpy(root_pos.astype(self.dtype))  # (frames, 3)
+        # rotations是(frames, 29, 1)，完整长度
+        # root_pos和root_quat也都是完整长度
+        rotations_tensor = torch.from_numpy(rotations.astype(self.dtype))  # (frames, 29, 1) - 完整长度
+        root_pos_tensor = torch.from_numpy(root_pos.astype(self.dtype))  # (frames, 3) - 完整长度
+        root_quat_tensor = torch.from_numpy(root_quat.astype(self.dtype))  # (frames, 4) - 完整长度
         
-        # 合并：qpos + root_pos = (frames, features, 1)
-        # rotations是(frames, 29, 1)，root_pos reshape为(frames, 3, 1)
+        # 合并：qpos + root_pos + root_quat = (frames, features, 1)
+        # rotations是(frames, 29, 1)，root_pos reshape为(frames, 3, 1)，root_quat reshape为(frames, 4, 1)
         root_pos_reshaped = root_pos_tensor[..., np.newaxis]  # (frames, 3, 1)
-        all_features = torch.cat([rotations_tensor, root_pos_reshaped], dim=1)  # (frames, 32, 1)
+        root_quat_reshaped = root_quat_tensor[..., np.newaxis]  # (frames, 4, 1)
+        all_features = torch.cat([rotations_tensor, root_pos_reshaped, root_quat_reshaped], dim=1)  # (frames, 36, 1) - 完整长度
         
-        # all_features现在是(frames, 32, 1)，其中29个是qpos，3个是root_pos
-        rotations_with_root = all_features  # (frames, 32, 1)
+        # all_features现在是(frames, 36, 1)，其中29个是qpos，3个是root_pos，4个是root_quat
+        rotations_with_root = all_features  # (frames, 36, 1) - 完整长度
         
+        # 现在切片：past和future
         future_motion = rotations_with_root[self.reference_frame_idx:]
         past_motion = rotations_with_root[:self.reference_frame_idx]
+        
+        # 切片traj_rotation和traj_pos（用于conditions）
+        traj_rotation = traj_rotation_full[self.reference_frame_idx:]
+        traj_pos = traj_pos[self.reference_frame_idx:]
     
         style_idx = float(self.style_set.index(self.global_conds['style'][motion_idx]))
         

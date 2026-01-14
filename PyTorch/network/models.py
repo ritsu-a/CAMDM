@@ -190,7 +190,7 @@ class OutputProcess(nn.Module):
         nframes, bs, d = output.shape
         output = self.poseFinal(output)  
         # 使用 input_feats 来确定实际的关节数和特征数
-        # 对于 qpos 格式：input_feats=32，应该 reshape 为 (nframes, bs, 32, 1)
+        # 对于 qpos 格式：input_feats=36（29 qpos + 3 root_pos + 4 root_quat），应该 reshape 为 (nframes, bs, 36, 1)
         # 对于传统格式：input_feats = njoints * nfeats
         actual_joints = self.input_feats // self.nfeats if self.nfeats > 0 else self.njoints
         output = output.reshape(nframes, bs, actual_joints, self.nfeats)
