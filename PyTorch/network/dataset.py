@@ -40,7 +40,7 @@ class MotionDataset(Dataset):
         self.past_frame = past_frame
         self.rotations_list, self.root_pos_list = [], []
         self.local_conds = {'traj_pose': [], 'traj_trans': []}
-        self.global_conds = {'style': [], 'text': [], 'text_feature': []}
+        self.global_conds = {'style': [], 'text': [], 'text_feature': [], 'text_features': []}
         
         self.rot_feat_dim = {'q': 4, '6d': 6, 'euler': 3, 'qpos': 1}
         self.reference_frame_idx = past_frame
@@ -83,8 +83,16 @@ class MotionDataset(Dataset):
             text = motion_item.get('text', motion_item['style'])
             self.global_conds['text'].append(text)
             # 加载预计算的CLIP特征，如果不存在则报错（需要先运行make_pose_data.py预处理）
-            if 'text_feature' in motion_item:
+            # 支持多个文本特征（G1ML3D数据集），在加载时随机选择一个
+            if 'text_features' in motion_item:
+                # 多个文本特征：保存所有特征，加载时随机选择
+                self.global_conds['text_features'].append(motion_item['text_features'].astype(np.float32))
+                # 为了兼容性，也保存第一个文本特征
+                self.global_conds['text_feature'].append(motion_item['text_features'][0].astype(np.float32))
+            elif 'text_feature' in motion_item:
+                # 单个文本特征：直接使用
                 self.global_conds['text_feature'].append(motion_item['text_feature'].astype(np.float32))
+                self.global_conds['text_features'].append(None)  # 标记为None
             else:
                 raise ValueError(f"text_feature not found in motion_item. Please run make_pose_data.py to precompute CLIP features.")
 
@@ -179,7 +187,13 @@ class MotionDataset(Dataset):
             past_motion = rotations_with_root[:self.reference_frame_idx]
             
             # 直接使用预计算的CLIP特征
-            text_feature = self.global_conds['text_feature'][motion_idx]  # (512,) numpy array
+            # 如果有多个文本特征，随机选择一个
+            text_features = self.global_conds['text_features'][motion_idx]
+            if text_features is not None and len(text_features) > 0:
+                # 随机选择一个文本特征
+                text_feature = text_features[random.randint(0, len(text_features) - 1)]  # (512,) numpy array
+            else:
+                text_feature = self.global_conds['text_feature'][motion_idx]  # (512,) numpy array
             text_feature = torch.from_numpy(text_feature).float()  # 转换为tensor
             
             # 确保traj_rotation是numpy array
@@ -264,7 +278,13 @@ class MotionDataset(Dataset):
         traj_pos = traj_pos[self.reference_frame_idx:]
     
         # 直接使用预计算的CLIP特征
-        text_feature = self.global_conds['text_feature'][motion_idx]  # (512,) numpy array
+        # 如果有多个文本特征，随机选择一个
+        text_features = self.global_conds['text_features'][motion_idx]
+        if text_features is not None and len(text_features) > 0:
+            # 随机选择一个文本特征
+            text_feature = text_features[random.randint(0, len(text_features) - 1)]  # (512,) numpy array
+        else:
+            text_feature = self.global_conds['text_feature'][motion_idx]  # (512,) numpy array
         text_feature = torch.from_numpy(text_feature).float()  # 转换为tensor
         
         # 确保traj_rotation是numpy array

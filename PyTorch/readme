@@ -4,6 +4,7 @@ parsing joint_vec into pkl for diffusion training:
 
 
     python data/make_pose_data.py
+    python data/process_g1ml3d.py
 
 
 # 单卡训练（调试模式）

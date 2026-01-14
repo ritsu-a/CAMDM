@@ -83,6 +83,7 @@ venv.bak/
 
 PyTorch/data/100STYLE_mixamo/
 PyTorch/data/100STYLE_g1/
+PyTorch/data/G1ML3D
 PyTorch/save/
 PyTorch/data/pkls/
 PyTorch/data_disk0
