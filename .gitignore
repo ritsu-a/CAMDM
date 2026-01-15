@@ -83,8 +83,12 @@ venv.bak/
 
 PyTorch/data/100STYLE_mixamo/
 PyTorch/data/100STYLE_g1/
-PyTorch/data/G1ML3D
+PyTorch/data/G1ML3D/
+PyTorch/data/aistpp_g1
 PyTorch/save/
 PyTorch/data/pkls/
 PyTorch/data_disk0
 100STYLE_to_mixamo.zip
+
+Evaluation/humanml3d_g1/checkpoints/
+Evaluation/humanml3d_g1/datasets/
