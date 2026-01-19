@@ -186,7 +186,7 @@ if __name__ == '__main__':
     import sys
     
     # 默认路径
-    default_pkl_path = 'data/pkls/g1ml3d.pkl'
+    default_pkl_path = 'data/pkls/aistpp_g1.pkl'
     default_output_dir = 'data/exported_npz'
     
     # 从命令行参数获取路径
