@@ -160,6 +160,10 @@ def main_worker(rank, world_size, args, config):
         os.makedirs(config.save, exist_ok=True)
         logger = Logger('%s/log.txt' % config.save)
         tb_writer = SummaryWriter(log_dir='%s/runtime' % config.save)
+        # 保存config到save文件夹
+        with open('%s/config.json' % config.save, 'w') as f:
+            f.write(str(config))
+        f.close()
         logger.info(f'\nGenerative locamotion training with config: \n{config}')
         logger.info(f'Starting distributed training on {world_size} GPUs')
     else:

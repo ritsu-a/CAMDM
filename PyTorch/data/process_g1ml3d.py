@@ -8,10 +8,29 @@ import numpy as np
 import torch
 import clip
 from tqdm import tqdm
+from scipy import signal
 from scipy.spatial.transform import Rotation as R
 from utils.diff_quat import vec6d_to_quat
 from data.make_pose_data import NPZMotion, convert_y_up_to_z_up
 
+
+def low_pass_filter(data, cutoff_freq=0.2, order=4):
+    """
+    Apply a low-pass Butterworth filter to the data.
+    
+    Parameters:
+        data (numpy.ndarray): The input data to be filtered.
+        cutoff_freq (float): The normalized cutoff frequency (0~1).
+        order (int): The order of the Butterworth filter.
+        
+    Returns:
+        numpy.ndarray: The filtered data.
+    """
+    b, a = signal.butter(order, cutoff_freq, 'low')
+    filtered_data = data.copy()
+    for idx in range(filtered_data.shape[1]):
+        filtered_data[:, idx] = signal.filtfilt(b, a, data[:, idx])
+    return filtered_data
 
 def load_g1_pickle(pickle_path):
     """
@@ -82,6 +101,17 @@ def process_g1_motion(pickle_path):
     root_quat_yup = data['root_quat']  # (frames, 4) - wxyz格式，Y-up格式
     fps = data['fps']
     frametime = 1.0 / fps
+    
+    # 对加载的动作数据应用低通滤波器
+    # 对关节角度进行滤波
+    angles = low_pass_filter(angles, cutoff_freq=0.2, order=4)
+    # 对根位置进行滤波
+    root_pos_yup = low_pass_filter(root_pos_yup, cutoff_freq=0.2, order=4)
+    # 对根四元数进行滤波（注意：滤波后可能需要重新归一化）
+    root_quat_yup = low_pass_filter(root_quat_yup, cutoff_freq=0.2, order=4)
+    # 重新归一化四元数以保持单位约束
+    quat_norm = np.linalg.norm(root_quat_yup, axis=1, keepdims=True)
+    root_quat_yup = root_quat_yup / (quat_norm + 1e-8)
     
     # 将Y-up格式转换为Z-up格式（仿照make_pose_data.py的处理）
     # 转换根位置和根四元数

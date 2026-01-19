@@ -43,3 +43,4 @@ python data/make_pose_data.py
 evaluatation:
  python test_model.py --checkpoint ./save/camdm_100style_g1/best.pt --data data/pkls/100style_g1.pkl --output ./test_output --num_samples 10
 
+python test_model.py --checkpoint ./save/camdm_humanml3d_g1ml3d_train/best.pt --data data/pkls/g1ml3d_test.pkl --output ./test_output --num_samples 10
