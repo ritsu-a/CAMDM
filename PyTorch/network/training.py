@@ -1,4 +1,5 @@
 import numpy as np
+import os
 import blobfile as bf
 import utils.common as common
 from tqdm import tqdm
@@ -6,6 +7,7 @@ import utils.nn_transforms as nn_transforms
 import itertools
 
 import torch
+import torch.distributed as dist
 from torch.optim import AdamW
 from torch.utils.data import Subset, DataLoader
 from torch_ema import ExponentialMovingAverage
@@ -62,7 +64,10 @@ class BaseTrainingPortal:
         sampling_num = 16
         sampling_idx = np.random.randint(0, len(self.dataloader.dataset), sampling_num)
         sampling_subset = DataLoader(Subset(self.dataloader.dataset, sampling_idx), batch_size=sampling_num)
-        self.evaluate_sampling(sampling_subset, save_folder_name='init_samples')
+        if getattr(self.config, "is_main", True):
+            self.evaluate_sampling(sampling_subset, save_folder_name='init_samples')
+        if getattr(self.config, "ddp", False):
+            dist.barrier()
         
         epoch_process_bar = tqdm(range(self.epoch, self.num_epochs), desc=f'Epoch {self.epoch}')
         for epoch_idx in epoch_process_bar:
@@ -72,6 +77,9 @@ class BaseTrainingPortal:
             epoch_losses = {}
             
             data_len = len(self.dataloader)
+            if hasattr(self.dataloader, "sampler") and hasattr(self.dataloader.sampler, "set_epoch"):
+                # ensure each rank shuffles differently each epoch
+                self.dataloader.sampler.set_epoch(epoch_idx)
             
             for datas in self.dataloader:
                 datas = {key: val.to(self.device) if torch.is_tensor(val) else val for key, val in datas.items()}
@@ -131,18 +139,26 @@ class BaseTrainingPortal:
             self.logger.info(f'Epoch {epoch_idx}/{self.config.trainer.epoch} | {loss_str} | best_loss: {self.best_loss:.6f}')
                         
             if epoch_idx > 0 and epoch_idx % self.config.trainer.save_freq == 0:
-                self.save_checkpoint(filename=f'weights_{epoch_idx}')
-                self.evaluate_sampling(sampling_subset, save_folder_name='train_samples')
+                if getattr(self.config, "is_main", True):
+                    self.save_checkpoint(filename=f'weights_{epoch_idx}')
+                    self.evaluate_sampling(sampling_subset, save_folder_name='train_samples')
             
             for key_name in epoch_losses.keys():
                 if 'loss' in key_name:
-                    self.tb_writer.add_scalar(f'train/{key_name}', np.mean(epoch_losses[key_name]), epoch_idx)
+                    if self.tb_writer is not None:
+                        self.tb_writer.add_scalar(f'train/{key_name}', np.mean(epoch_losses[key_name]), epoch_idx)
 
             self.scheduler.step()
+            if getattr(self.config, "ddp", False):
+                dist.barrier()
         
         best_path = '%s/best.pt' % (self.config.save)
-        self.load_checkpoint(best_path)
-        self.evaluate_sampling(sampling_subset, save_folder_name='best')
+        # In short/debug runs, best checkpoint might not be created.
+        if getattr(self.config, "is_main", True) and bf.exists(best_path):
+            self.load_checkpoint(best_path)
+            self.evaluate_sampling(sampling_subset, save_folder_name='best')
+        elif getattr(self.config, "is_main", True):
+            self.logger.info(f'Skip loading best checkpoint (not found): {best_path}')
 
 
     def state_dict(self):
@@ -158,6 +174,8 @@ class BaseTrainingPortal:
         }
 
     def save_checkpoint(self, filename='weights'):
+        if not getattr(self.config, "is_main", True):
+            return
         save_path = '%s/%s.pt' % (self.config.save, filename)
         with bf.BlobFile(bf.join(save_path), "wb") as f:
             torch.save(self.state_dict(), f)
@@ -180,8 +198,14 @@ class BaseTrainingPortal:
 class MotionTrainingPortal(BaseTrainingPortal):
     def __init__(self, config, model, diffusion, dataloader, logger, tb_writer, finetune_loader=None):
         super().__init__(config, model, diffusion, dataloader, logger, tb_writer, finetune_loader)
-        self.skel_offset = torch.from_numpy(self.dataloader.dataset.T_pose.offsets).to(self.device)
-        self.skel_parents = self.dataloader.dataset.T_pose.parents
+        # Skeleton is only required for 3D/contact losses (100STYLE). AIST++ G1 training may not have it.
+        self.skel_offset = None
+        self.skel_parents = None
+        if hasattr(self.dataloader.dataset, 'T_pose') and getattr(self.dataloader.dataset, 'T_pose') is not None:
+            tpose = self.dataloader.dataset.T_pose
+            if hasattr(tpose, 'offsets') and hasattr(tpose, 'parents'):
+                self.skel_offset = torch.from_numpy(tpose.offsets).to(self.device)
+                self.skel_parents = tpose.parents
         
 
     def diffuse(self, x_start, t, cond, noise=None, return_loss=False):
@@ -195,10 +219,14 @@ class MotionTrainingPortal(BaseTrainingPortal):
         
         # [bs, joint_num, joint_feat, future_frames]
         cond['past_motion'] = cond['past_motion'].permute(0, 2, 3, 1) # [bs, joint_num, joint_feat, past_frames]
-        cond['traj_pose'] = cond['traj_pose'].permute(0, 2, 1) # [bs, 6, frame_num//2]
-        cond['traj_trans'] = cond['traj_trans'].permute(0, 2, 1) # [bs, 2, frame_num//2]
+        if 'traj_pose' in cond:
+            cond['traj_pose'] = cond['traj_pose'].permute(0, 2, 1) # [bs, 6, frame_num//2]
+        if 'traj_trans' in cond:
+            cond['traj_trans'] = cond['traj_trans'].permute(0, 2, 1) # [bs, 2, frame_num//2]
         
-        model_output = self.model.interface(x_t, self.diffusion._scale_timesteps(t), cond)
+        # Support DDP-wrapped model.
+        model = self.model.module if hasattr(self.model, "module") else self.model
+        model_output = model.interface(x_t, self.diffusion._scale_timesteps(t), cond)
         
         if return_loss:
             loss_terms = {}
@@ -227,7 +255,7 @@ class MotionTrainingPortal(BaseTrainingPortal):
                 target_vel = target[..., 1:] - target[..., :-1]
                 loss_terms['loss_data_vel'] = self.diffusion.masked_l2(target_vel[:, :-1], model_output_vel[:, :-1], mask[..., 1:])
                   
-            if self.config.trainer.use_loss_3d or self.config.use_loss_contact:
+            if (self.config.trainer.use_loss_3d or self.config.trainer.use_loss_contact) and self.skel_offset is not None and self.skel_parents is not None:
                 target_rot, pred_rot, past_rot = target.permute(0, 3, 1, 2), model_output.permute(0, 3, 1, 2), cond['past_motion'].permute(0, 3, 1, 2)
                 target_root_pos, pred_root_pos, past_root_pos = target_rot[:, :, -1, :3], pred_rot[:, :, -1, :3], past_rot[:, :, -1, :3]
                 skeletons = self.skel_offset.unsqueeze(0).expand(batch_size, -1, -1)
@@ -292,14 +320,20 @@ class MotionTrainingPortal(BaseTrainingPortal):
         
 
     def export_samples(self, future_motion_feature, past_motion_feature, save_path, prefix):
+        """
+        AIST++ G1 export:
+          - Save dof (qpos) as numpy arrays to NPZ.
+          - IMPORTANT: tensors may live on GPU; convert to CPU before saving.
+        motion_feature: [bs, past+future, 1, dof_dim]
+        """
+        os.makedirs(save_path, exist_ok=True)
         motion_feature = torch.cat((past_motion_feature, future_motion_feature), dim=1)
-        rotations = nn_transforms.repr6d2quat(motion_feature[:, :, :-1]).cpu().numpy()
-        root_pos = motion_feature[:, :, -1, :3].cpu().numpy()
-        
-        for samplie_idx in range(future_motion_feature.shape[0]):
-            T_pose_template = self.dataloader.dataset.T_pose.copy()
-            T_pose_template.rotations = rotations[samplie_idx]
-            T_pose_template.positions = np.zeros((rotations[samplie_idx].shape[0], T_pose_template.positions.shape[1], T_pose_template.positions.shape[2]))
-            T_pose_template.positions[:, 0] = root_pos[samplie_idx]
-            T_pose_template.export(f'{save_path}/motion_{samplie_idx}.{prefix}.bvh', save_ori_scal=True)  
+
+        for sample_idx in range(motion_feature.shape[0]):
+            qpos = motion_feature[sample_idx].detach().cpu().numpy()
+            # store as (T, dof_dim) for convenience (drop the joint dim=1)
+            if qpos.ndim == 3 and qpos.shape[1] == 1:
+                qpos = qpos[:, 0, :]
+            motion_data = {"qpos": qpos}
+            np.savez(f'{save_path}/motion_{sample_idx}.{prefix}.npz', **motion_data)
         

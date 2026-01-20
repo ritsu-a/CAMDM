@@ -236,7 +236,10 @@ class GaussianDiffusion:
         # print('mask', mask.shape)
         # print('non_zero_elements', non_zero_elements)
         # print('loss', loss)
-        mse_loss_val = loss / non_zero_elements
+        # If mask has no valid elements (e.g., empty sequence for vel loss),
+        # avoid 0/0 -> NaN by returning 0.
+        mse_loss_val = loss / torch.clamp(non_zero_elements, min=1.0)
+        mse_loss_val = torch.where(non_zero_elements > 0, mse_loss_val, torch.zeros_like(mse_loss_val))
         # print('mse_loss_val', mse_loss_val)
         return mse_loss_val
 

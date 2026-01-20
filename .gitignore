@@ -83,3 +83,4 @@ venv.bak/
 
 PyTorch/data/aistpp_g1/
 PyTorch/data/pkls/
+PyTorch/save/

@@ -1,2 +1,11 @@
 Preprocess aistpp:
-    python PyTorch/data/preprocess_aistpp.py
+    python data/preprocess_aistpp.py
+
+
+
+Train diffusion model:
+    # single GPU (debug)
+    python train.py -n camdm --epoch 100 --batch_size 512 --diffusion_steps 4 -i data/pkls/aistpp_g1.pkl --past_frame 0 --future_frame 150
+
+    # 8 GPUs (DDP)
+    torchrun --nproc_per_node=8 train.py -n camdm --epoch 100 --batch_size 512 --diffusion_steps 4 -i data/pkls/aistpp_g1.pkl --past_frame 0 --future_frame 150
