@@ -216,6 +216,9 @@ class MotionTrainingPortal(BaseTrainingPortal):
             noise = th.randn_like(x_start)
         
         x_t = self.diffusion.q_sample(x_start, t, noise=noise)
+
+
+        
         
         # [bs, joint_num, joint_feat, future_frames]
         cond['past_motion'] = cond['past_motion'].permute(0, 2, 3, 1) # [bs, joint_num, joint_feat, past_frames]

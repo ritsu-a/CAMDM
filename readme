@@ -9,3 +9,9 @@ Train diffusion model:
 
     # 8 GPUs (DDP)
     torchrun --nproc_per_node=8 train.py -n camdm --epoch 100 --batch_size 512 --diffusion_steps 4 -i data/pkls/aistpp_g1.pkl --past_frame 0 --future_frame 150
+
+
+
+Visualize the training results:
+    python /root/workspace/CAMDM/external/GMR/scripts/vis_gt_pred_comparison.py --input_dir /root/workspace/CAMDM/PyTorch/save/camdm_aistpp_g1/train_samples \
+    --output_path /root/workspace/CAMDM/gt_pred_comparison.mp4

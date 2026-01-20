@@ -82,6 +82,8 @@ class MotionDiffusion(nn.Module):
             audio_emb = self.audio_process(audio_feat)  # [nframes, bs, L]
             embs.append(audio_emb)
 
+
+
         past_motion_emb = self.past_motion_process(past_motion)  # [past_frames, bs, L]
         
         future_motion_emb = self.future_motion_process(x) 
@@ -130,16 +132,27 @@ class MotionProcess(nn.Module):
 
 
 class TrajProcess(nn.Module):
-    def __init__(self, input_feats, latent_dim):
+    def __init__(self, input_feats, latent_dim, downsample_factor=10):
         super().__init__()
         self.input_feats = input_feats
         self.latent_dim = latent_dim
+        self.downsample_factor = downsample_factor
+        # 1D卷积层用于时间维度下采样: kernel_size=10, stride=10
+        self.temporal_conv = nn.Conv1d(
+            in_channels=input_feats,
+            out_channels=input_feats,
+            kernel_size=downsample_factor,
+            stride=downsample_factor,
+            padding=0
+        )
         self.poseEmbedding = nn.Linear(self.input_feats, self.latent_dim)
 
     def forward(self, x):
         bs,  nfeats, nframes = x.shape
-        x = x.permute((2, 0, 1))
-        x = self.poseEmbedding(x)  
+        # 对nframes维度进行10倍下采样: [bs, nfeats, nframes] -> [bs, nfeats, nframes//10]
+        x = self.temporal_conv(x)
+        x = x.permute((2, 0, 1))  # [nframes//10, bs, nfeats]
+        x = self.poseEmbedding(x)  # [nframes//10, bs, latent_dim]
         return x
 
 

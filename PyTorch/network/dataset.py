@@ -97,7 +97,6 @@ class AISTPPG1Dataset(Dataset):
             'conditions': {
                 'past_motion': past_motion,
                 'audio_feat': audio_feat,
-                'style_idx': torch.tensor(0.0, dtype=torch.float32),
                 'mask': torch.from_numpy(self.mask.copy())
             }
         }
