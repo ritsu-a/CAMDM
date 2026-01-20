@@ -1,0 +1,2 @@
+Preprocess aistpp:
+    python PyTorch/data/preprocess_aistpp.py
