@@ -14,7 +14,7 @@ from torch.utils.data.distributed import DistributedSampler
 from utils.logger import Logger
 from network.models import MotionDiffusion
 from network.training import MotionTrainingPortal
-from network.dataset import AISTPPG1Dataset
+from network.dataset import AISTPPG1Dataset, G1ML3DDataset
 
 from diffusion.create_diffusion import create_gaussian_diffusion
 from config.option import add_model_args, add_train_args, add_diffusion_args, config_parse
@@ -40,14 +40,28 @@ def train(config, resume, logger, tb_writer):
     np_dtype = common.select_platform(32)
     
     print("Loading dataset..")
-    train_data = AISTPPG1Dataset(
-        config.data,
-        offset_frame=config.arch.offset_frame,
-        past_frame=config.arch.past_frame,
-        future_frame=config.arch.future_frame,
-        dtype=np_dtype,
-        limited_num=config.trainer.load_num,
-    )
+    # Auto-detect dataset type based on data file path or content
+    # If data path contains 'g1ml3d', use G1ML3DDataset, otherwise use AISTPPG1Dataset
+    if 'g1ml3d' in config.data.lower():
+        print(f"Detected G1ML3D dataset, using G1ML3DDataset")
+        train_data = G1ML3DDataset(
+            config.data,
+            offset_frame=config.arch.offset_frame,
+            past_frame=config.arch.past_frame,
+            future_frame=config.arch.future_frame,
+            dtype=np_dtype,
+            limited_num=config.trainer.load_num,
+        )
+    else:
+        print(f"Detected AIST++ dataset, using AISTPPG1Dataset")
+        train_data = AISTPPG1Dataset(
+            config.data,
+            offset_frame=config.arch.offset_frame,
+            past_frame=config.arch.past_frame,
+            future_frame=config.arch.future_frame,
+            dtype=np_dtype,
+            limited_num=config.trainer.load_num,
+        )
     sampler = None
     if getattr(config, "ddp", False):
         sampler = DistributedSampler(train_data, num_replicas=config.world_size, rank=config.rank, shuffle=True, drop_last=False)

@@ -1,17 +1,29 @@
 Preprocess aistpp:
     python data/preprocess_aistpp.py
-
+Preprocess g1ml3d:
+    python data/preprocess_g1ml3d.py
 
 
 Train diffusion model:
-    # single GPU (debug)
-    python train.py -n camdm --epoch 100 --batch_size 512 --diffusion_steps 4 -i data/pkls/aistpp_g1.pkl --past_frame 0 --future_frame 150
+    # single GPU (debug) - G1ML3D dataset
+    python train.py -n camdm --epoch 100 --batch_size 512 --diffusion_steps 4 -i data/pkls/g1ml3d_v1_train.pkl --past_frame 0 --future_frame 128
+    
+    # single GPU (debug) - AIST++ dataset
+    python train.py -n camdm --epoch 100 --batch_size 512 --diffusion_steps 4 -i data/pkls/aistpp_g1.pkl --past_frame 0 --future_frame 150 
 
-    # 8 GPUs (DDP)
-    torchrun --nproc_per_node=8 train.py -n camdm --epoch 100 --batch_size 512 --diffusion_steps 4 -i data/pkls/aistpp_g1.pkl --past_frame 0 --future_frame 150
+    # 8 GPUs (DDP) - G1ML3D dataset
+    # 方法1: 使用 --master_port 参数（推荐）
+    torchrun --nproc_per_node=8 --master_port=29501 train.py -n camdm --epoch 1000 --batch_size 512 --diffusion_steps 4 -i data/pkls/g1ml3d_v1_train.pkl --past_frame 0 --future_frame 128
+    
+    # 方法2: 如果 --master_port 不支持，使用 export 设置环境变量
+    # export MASTER_PORT=29501
+    # torchrun --nproc_per_node=8 train.py -n camdm --epoch 1000 --batch_size 512 --diffusion_steps 4 -i data/pkls/g1ml3d_v1_train.pkl --past_frame 0 --future_frame 128
+    
+    # 8 GPUs (DDP) - AIST++ dataset (使用不同端口避免冲突)
+    torchrun --nproc_per_node=8 --master_port=29502 train.py -n camdm --epoch 1000 --batch_size 512 --diffusion_steps 4 -i data/pkls/aistpp_g1.pkl --past_frame 10 --future_frame 30
 
 
 
 Visualize the training results:
-    python /root/workspace/CAMDM/external/GMR/scripts/vis_gt_pred_comparison.py --input_dir /root/workspace/CAMDM/PyTorch/save/camdm_aistpp_g1/train_samples \
+    python /root/workspace/CAMDM/external/GMR/scripts/vis_gt_pred_comparison.py --input_dir /root/workspace/CAMDM/PyTorch/save/camdm_g1ml3d_v1_train/init_samples \
     --output_path /root/workspace/CAMDM/gt_pred_comparison.mp4
